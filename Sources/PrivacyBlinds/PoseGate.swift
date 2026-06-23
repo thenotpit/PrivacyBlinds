@@ -37,6 +37,17 @@ struct PoseGate {
         lastPitch = nil
     }
 
+    /// Hard reset for a fresh start / pose-source switch: drop the anchor AND zero the deviations, so
+    /// the view reads as open (no stale-deviation flash) until a new anchor is settled.
+    mutating func fullReset() {
+        reset()
+        hasAnchor = false
+        referenceRoll = 0
+        referencePitch = 0
+        rollDeviation = 0
+        pitchDeviation = 0
+    }
+
     mutating func apply(roll: Float, pitch: Float, now: TimeInterval) {
         // Stillness: how long roll+pitch have stayed under the threshold.
         if let lr = lastRoll, let lp = lastPitch {

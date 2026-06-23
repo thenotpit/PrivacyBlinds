@@ -31,11 +31,19 @@ final class PrivacyLensModel {
     private(set) var gazeDirection: Float = 0
     /// ARKit ambient light estimate (lux, -1 when unknown). Surfaced via the modifier for the host.
     private(set) var ambientLux: Double = -1
+    /// True once gaze tracking is online this session (or unavailable → pose-only). Drives the
+    /// post-unlock "warming up" cover so content isn't exposed while ARKit acquires the face.
+    private(set) var gazeReady = false
     /// Random offset for the perforated mask, regenerated each appearance (static while shown).
     private(set) var maskSeed = SIMD2<Float>(0, 0)
 
+    /// Lock state for authenticated-gaze mode. In pose-only mode it stays `.unlocked` and is ignored.
+    enum LockState { case locked, authenticating, unlocked }
+    private(set) var lockState: LockState = .unlocked
+
     private let poseSource: PoseSource
     private let gazeSource: GazeSource
+    private let authenticator: Authenticating
     private var poseGate = PoseGate()
     private var gazeGate = GazeGate()
 
@@ -43,16 +51,22 @@ final class PrivacyLensModel {
     private var gazeToken: UUID?
     /// While the AR (eye-tracking) session runs it suspends CMMotionManager, so pose comes from ARKit.
     private var usingARPose = false
+    // Gaze config carried so unlock can (re)start gaze with the right thresholds.
+    private var gazeMinLux = Tuning.ambientLuxLow
+    private var gazeResumeLux = Tuning.ambientLuxHigh
 
-    init(pose: PoseSource = MotionManager.shared, gaze: GazeSource = EyeTracker.shared) {
+    init(pose: PoseSource = MotionManager.shared,
+         gaze: GazeSource = EyeTracker.shared,
+         authenticator: Authenticating = BiometricAuthenticator()) {
         self.poseSource = pose
         self.gazeSource = gaze
+        self.authenticator = authenticator
     }
 
     func start() {
-        poseGate.reset()
-        maskSeed = SIMD2<Float>(.random(in: 0..<Tuning.maskSeedRange),
-                                .random(in: 0..<Tuning.maskSeedRange))
+        poseGate.fullReset()
+        publishPose()
+        regenerateMaskSeed()
         guard token == nil else { return }
         token = poseSource.addListener { [weak self] reading in
             // The sources always fan out on the main thread, so assume main-actor isolation and
@@ -78,25 +92,34 @@ final class PrivacyLensModel {
     func startGaze(minLux: Double, resumeLux: Double) {
         gazeGate.minLux = minLux
         gazeGate.resumeLux = resumeLux
+        // Open the moment we unlock: zero pose + re-baseline gaze and publish now, so the view shows
+        // through the camera warm-up instead of flashing the cover until the first AR frame lands.
         gazeGate.recenter()
+        poseGate.fullReset()
+        gazeReady = false   // begin warm-up: hold the processing cover until tracking is online
+        publishPose()
+        publishGaze()
         guard gazeToken == nil else { return }
         gazeToken = gazeSource.addListener { [weak self] reading in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if reading.unavailable {
                     // No TrueDepth / permission denied → AR drives nothing; stay on CoreMotion pose.
-                    if self.usingARPose { self.usingARPose = false; self.poseGate.reset() }
+                    if self.usingARPose { self.usingARPose = false; self.poseGate.fullReset() }
                     self.gazeGate.reset()
+                    self.gazeReady = true   // no gaze → pose-only protection is live; end warm-up
+                    self.publishPose()
                     self.publishGaze()
                     return
                 }
                 // AR session is delivering frames → it drives pose (CMMotionManager is suspended).
-                if !self.usingARPose { self.usingARPose = true; self.poseGate.reset() }
+                if !self.usingARPose { self.usingARPose = true; self.poseGate.fullReset() }
                 self.poseGate.apply(roll: reading.roll, pitch: reading.pitch, now: CACurrentMediaTime())
                 self.publishPose()
                 // The gate handles look-away (binary slam) and low-light suspension internally.
                 self.gazeGate.apply(reading)
                 self.ambientLux = reading.ambientLux
+                self.gazeReady = self.gazeGate.ready
                 self.publishGaze()
             }
         }
@@ -106,14 +129,55 @@ final class PrivacyLensModel {
         if let gazeToken { gazeSource.removeListener(gazeToken) }
         gazeToken = nil
         gazeGate.reset()
+        gazeReady = false
+        if usingARPose { usingARPose = false; poseGate.fullReset() }
         publishGaze()
-        if usingARPose { usingARPose = false; poseGate.reset() }   // CoreMotion resumes → re-anchor
+        publishPose()   // zero deviations so the next start/unlock reads as open (no stale flash)
     }
 
     func stop() {
         if let token { poseSource.removeListener(token) }
         token = nil
         stopGaze()
+    }
+
+    // MARK: Authenticated-gaze lock state
+
+    /// Enter authenticated-gaze mode: start LOCKED (camera off) and wait for a tap to authenticate.
+    func enterAuthenticatedMode(minLux: Double, resumeLux: Double) {
+        gazeMinLux = minLux
+        gazeResumeLux = resumeLux
+        regenerateMaskSeed()   // fresh perforation pattern for the locked screen
+        lockState = .locked
+    }
+
+    /// Tap on the locked cover → authenticate; on success unlock + start gaze, else stay locked.
+    func beginUnlock(reason: String) {
+        guard lockState == .locked else { return }
+        lockState = .authenticating
+        authenticator.authenticate(reason: reason) { [weak self] success in
+            guard let self else { return }
+            if success {
+                self.lockState = .unlocked
+                self.regenerateMaskSeed()
+                self.startGaze(minLux: self.gazeMinLux, resumeLux: self.gazeResumeLux)
+            } else {
+                self.lockState = .locked
+            }
+        }
+    }
+
+    /// Return to the locked state (re-lock): stop gaze/camera and require auth again.
+    func relock() {
+        guard lockState != .locked else { return }
+        regenerateMaskSeed()   // fresh perforation pattern each lock
+        lockState = .locked
+        stopGaze()
+    }
+
+    private func regenerateMaskSeed() {
+        maskSeed = SIMD2<Float>(.random(in: 0..<Tuning.maskSeedRange),
+                                .random(in: 0..<Tuning.maskSeedRange))
     }
 
     private func publishPose() {
@@ -148,16 +212,27 @@ public struct PrivacyBlindsModifier: ViewModifier {
     var openThresholdDeg: Float = 8
     var closeThresholdDeg: Float = 16
     var maxViewAngleDeg: Float = 20
-    var eyeTracking: Bool = false   // opt-in: also close when the user looks away (front camera)
-    var eyeTrackingMinLux: Double = Tuning.ambientLuxLow      // suspend gaze below this ambient light
-    var eyeTrackingResumeLux: Double = Tuning.ambientLuxHigh  // resume gaze above this ambient light
+    // Authenticated-gaze mode: Face ID lock/unlock + eye tracking (bundled). Off = pose-only.
+    var authenticatedGaze: Bool = false
+    var gazeMinLux: Double = Tuning.ambientLuxLow      // suspend gaze below this ambient light
+    var gazeResumeLux: Double = Tuning.ambientLuxHigh  // resume gaze above this ambient light
+    var relockSeconds: Double = 10                     // re-lock after this long continuously covered
+    var lockMaskFillRatio: Float = 0.4                 // perforation density on the locked screen
+    var unlockReason: String = "Unlock to reveal"
+    // Locked-screen appearance (all default to the stock white / black look).
+    var lockBackgroundColor: Color = .white
+    var lockPatternColor: Color = .black
+    var lockIconBackgroundColor: Color = .white
+    var lockIconColor: Color = .black
     var onStateChange: ((Bool) -> Void)?
     var onAmbientLux: ((Double) -> Void)?   // reports the ARKit ambient light estimate (lux)
 
     @State private var model = PrivacyLensModel()
     @State private var touchLocation: CGPoint?
     @State private var revealProgress: CGFloat = 0
+    @State private var relockTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
 
     /// The tileable blue-noise dither array shipped with the package, loaded once.
     private static let blueNoise: Image = {
@@ -195,20 +270,20 @@ public struct PrivacyBlindsModifier: ViewModifier {
         return smoothstep(open, close, deviationMagnitude)
     }
 
-    /// 0 = fully open/revealed .. 1 = fully closed/covered. Closes on pose deviation OR (when eye
-    /// tracking is on) looking away — whichever is greater.
+    /// 0 = fully open/revealed .. 1 = fully closed/covered. Closes on pose deviation OR (in
+    /// authenticated-gaze mode, while unlocked) looking away — whichever is greater.
     private var closeProgress: Float {
         let pose = poseCloseProgress
-        guard eyeTracking else { return pose }
+        guard authenticatedGaze else { return pose }
         return max(pose, model.gazeAway)
     }
 
     /// Signed view angle (radians) driving the closing-sweep direction. Pose: roll does left/right,
-    /// pitch maps forward → left and back → right (summed). When eye tracking is the dominant closer,
-    /// the look-away direction drives the sweep instead.
+    /// pitch maps forward → left and back → right (summed). When gaze is the dominant closer, the
+    /// look-away direction drives the sweep instead.
     private var viewAngle: Float {
         let maxV = maxViewAngleDeg * .pi / 180
-        if eyeTracking && model.gazeAway > poseCloseProgress {
+        if authenticatedGaze && model.gazeAway > poseCloseProgress {
             return max(-maxV, min(maxV, model.gazeDirection * maxV))
         }
         let dir = model.rollDeviation + model.pitchDeviation
@@ -219,7 +294,10 @@ public struct PrivacyBlindsModifier: ViewModifier {
         // Reading closeProgress here establishes the state/observation dependencies for re-render.
         let progress = closeProgress
         let angle = viewAngle
-        let closed = enabled && progress > Tuning.closedThreshold
+        let locked = authenticatedGaze && model.lockState != .unlocked
+        // Unlocked but tracking not yet online → hold a covering "warming up" scan over the content.
+        let warming = authenticatedGaze && model.lockState == .unlocked && !model.gazeReady
+        let closed = enabled && (locked || warming || progress > Tuning.closedThreshold)
         let maskActive = enabled && maskFillRatio > 0
         let touch = touchLocation
 
@@ -227,45 +305,142 @@ public struct PrivacyBlindsModifier: ViewModifier {
             .overlay {
                 if enabled {
                     GeometryReader { geo in
-                        coverLayer(size: geo.size, closeProgress: progress, viewAngle: angle,
-                                   revealY: Float(touch?.y ?? 0), revealProgress: Double(revealProgress))
-                            .overlay {
-                                // Observe touches to drive the reading band WITHOUT consuming them, so
-                                // the content underneath still scrolls. A window-level recognizer also
-                                // dodges the ScrollView's ~150ms delaysContentTouches latency, so the
-                                // band starts instantly. Only present while the mask is on.
-                                if maskActive {
-                                    TouchObserver { location in
-                                        if let location {
-                                            touchLocation = location
-                                            if revealProgress != 1 {
-                                                setRevealProgress(1, .easeOut(duration: Tuning.revealOpenDuration))
+                        if locked {
+                            lockedCover(size: geo.size)
+                        } else if warming {
+                            warmingCover(size: geo.size)
+                        } else {
+                            coverLayer(size: geo.size, closeProgress: progress, viewAngle: angle,
+                                       revealY: Float(touch?.y ?? 0), revealProgress: Double(revealProgress))
+                                .overlay {
+                                    // Observe touches to drive the reading band WITHOUT consuming them,
+                                    // so the content underneath still scrolls. A window-level recognizer
+                                    // also dodges the ScrollView's ~150ms delaysContentTouches latency,
+                                    // so the band starts instantly. Only present while the mask is on.
+                                    if maskActive {
+                                        TouchObserver { location in
+                                            if let location {
+                                                touchLocation = location
+                                                if revealProgress != 1 {
+                                                    setRevealProgress(1, .easeOut(duration: Tuning.revealOpenDuration))
+                                                }
+                                            } else if revealProgress != 0 {
+                                                setRevealProgress(0, .easeIn(duration: Tuning.revealCloseDuration))
                                             }
-                                        } else if revealProgress != 0 {
-                                            setRevealProgress(0, .easeIn(duration: Tuning.revealCloseDuration))
                                         }
                                     }
                                 }
-                            }
-                            // Deliberate re-center: two-finger triple-tap re-anchors the reading pose
-                            // to the current pose (for recovering a lost view angle). Never automatic.
-                            .overlay { RecenterGesture { model.recenter() } }
+                                // Deliberate re-center: two-finger triple-tap re-anchors the reading
+                                // pose to the current pose (recovering a lost view angle). Never automatic.
+                                .overlay { RecenterGesture { model.recenter() } }
+                        }
                     }
                     .ignoresSafeArea()
-                    // Open ⇒ touches pass through to content (scroll/tap); closed ⇒ cover locks interaction.
+                    // Locked ⇒ cover is a tap target; open ⇒ touches pass through; closed ⇒ locks interaction.
                     .allowsHitTesting(closed)
                 }
             }
-            .onAppear {
-                model.start()
-                if eyeTracking { model.startGaze(minLux: eyeTrackingMinLux, resumeLux: eyeTrackingResumeLux) }
-            }
+            .onAppear { startMode() }
             .onDisappear { model.stop() }
-            .onChange(of: eyeTracking) { _, on in
-                on ? model.startGaze(minLux: eyeTrackingMinLux, resumeLux: eyeTrackingResumeLux) : model.stopGaze()
+            .onChange(of: authenticatedGaze) { _, _ in model.stop(); startMode() }
+            .onChange(of: closed) { _, newValue in
+                onStateChange?(newValue)
+                scheduleRelockIfNeeded(covered: newValue)
             }
-            .onChange(of: closed) { _, newValue in onStateChange?(newValue) }
+            .onChange(of: scenePhase) { _, phase in
+                // Re-lock on background (also covers the app-switcher snapshot). Not on `.inactive`,
+                // which the Face ID prompt itself triggers.
+                if phase == .background, model.lockState == .unlocked { model.relock() }
+            }
             .onChange(of: model.ambientLux) { _, lux in onAmbientLux?(lux) }
+    }
+
+    /// Start the right mode for the current `authenticatedGaze` setting.
+    private func startMode() {
+        if authenticatedGaze {
+            model.enterAuthenticatedMode(minLux: gazeMinLux, resumeLux: gazeResumeLux)
+        } else {
+            model.start()
+        }
+    }
+
+    /// Re-lock after the view has been continuously covered for `relockSeconds` (authenticated-gaze
+    /// only, while unlocked). Revealing cancels the pending re-lock.
+    private func scheduleRelockIfNeeded(covered: Bool) {
+        relockTask?.cancel()
+        relockTask = nil
+        guard authenticatedGaze, covered, model.lockState == .unlocked else { return }
+        relockTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(relockSeconds))
+            if !Task.isCancelled, model.lockState == .unlocked { model.relock() }
+        }
+    }
+
+    /// The SAME perforated blue-noise pattern the shader paints over the protected view, here in
+    /// `lockPatternColor` over an opaque `lockBackgroundColor` base — the exact mask texture, made
+    /// fully opaque. Rendered with the real shader at `closeProgress 0` (blinds cover invisible, only
+    /// the mask perforation shows: pattern where `bn < fill`, transparent in the holes). Shared by the
+    /// locked screen and the warm-up scan.
+    private func perforatedField(size: CGSize, fill: Float) -> some View {
+        ZStack {
+            lockBackgroundColor
+            Rectangle().fill(.black)
+                .modifier(PrivacyBlindsShaderModifier(
+                    size: size,
+                    stripWidthPt: stripWidthPt,
+                    closeProgress: 0,                 // blinds cover invisible — only the mask shows
+                    stripSweep: stripSweep,
+                    transition: transition,
+                    viewAngle: 0,
+                    directionalSweep: directionalSweep,
+                    maskFillRatio: fill,
+                    maskCellSize: maskCellSize,
+                    maskSeed: model.maskSeed,
+                    revealY: 0,
+                    revealHalfHeight: 0,
+                    revealFeather: 0,
+                    revealProgress: 0,                // no touch reading band here
+                    blueNoise: Self.blueNoise,
+                    maskUseImage: 0,
+                    maskColor: lockPatternColor,
+                    maskImage: Self.clearPixel
+                ))
+        }
+    }
+
+    /// The locked state: the perforated field with the lock glyph. Tapping it prompts Face ID.
+    private func lockedCover(size: CGSize) -> some View {
+        perforatedField(size: size, fill: lockMaskFillRatio)
+            .overlay { lockGlyph }
+            .ignoresSafeArea()
+            .contentShape(Rectangle())
+            .onTapGesture { model.beginUnlock(reason: unlockReason) }
+    }
+
+    /// Post-unlock "warming up": the privacy texture "calibrates" — its perforation density breathes
+    /// in place while ARKit acquires the face, then it gives way to the content the moment gaze is
+    /// live. Animated in place (no dimension dependence), so it works at any view size.
+    private func warmingCover(size: CGSize) -> some View {
+        TimelineView(.animation) { timeline in
+            let phase = timeline.date.timeIntervalSinceReferenceDate
+            let fill = Float(0.40 + 0.22 * sin(phase * 3.0))   // breathe density ~0.18 .. 0.62
+            perforatedField(size: size, fill: fill)
+        }
+        .ignoresSafeArea()
+        .contentShape(Rectangle())
+    }
+
+    /// Lock icon on a tight square (8pt padding all around). Uses the bundled vector icon, template-
+    /// rendered so `lockIconColor` tints it.
+    private var lockGlyph: some View {
+        Image("lock-icon", bundle: .module)
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 36, height: 36)
+            .foregroundStyle(lockIconColor)
+            .padding(8)
+            .background(lockIconBackgroundColor)
     }
 
     private func coverLayer(size: CGSize, closeProgress: Float, viewAngle: Float,

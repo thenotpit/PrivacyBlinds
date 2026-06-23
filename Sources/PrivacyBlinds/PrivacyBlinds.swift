@@ -60,15 +60,21 @@ public extension View {
     ///   - maskRevealFeather: Soft edge of the reading band in points (default `18`).
     ///   - maskCover: The mask pattern's appearance — `.black`, `.color`, or `.image` — independent of
     ///     the blinds `cover` (default `.black`).
-    ///   - eyeTracking: Opt-in. When `true`, also close the overlay when the user looks away (TrueDepth
-    ///     front camera, on-device). The gaze close is instant (binary), independent of the tilt sweep.
-    ///     Starting it prompts for camera permission — the host app must include an
-    ///     `NSCameraUsageDescription`. Falls back to pose-only if unsupported, denied, or too dark.
-    ///     Default `false`.
-    ///   - eyeTrackingMinLux: Ambient light (lux) below which gaze is suspended (pose-only). Default `450`.
-    ///   - eyeTrackingResumeLux: Ambient light (lux) above which gaze resumes (hysteresis). Default `600`.
+    ///   - authenticatedGaze: Opt-in. When `true`, the view starts in a **locked** state (a blue-noise
+    ///     cover over solid white); tapping it prompts Face ID / passcode to unlock. While unlocked,
+    ///     pose + on-device eye tracking gate as normal, and the gaze close is instant (binary). It
+    ///     re-locks after `relockSeconds` continuously covered, or when the app is backgrounded.
+    ///     Requires an `NSCameraUsageDescription` in the host app. Default `false` (pose-only).
+    ///   - gazeMinLux: Ambient light (lux) below which gaze is suspended (pose-only). Default `450`.
+    ///   - gazeResumeLux: Ambient light (lux) above which gaze resumes (hysteresis). Default `600`.
+    ///   - relockSeconds: Re-lock after the view is continuously covered this long (default `10`).
+    ///   - unlockReason: Prompt text shown by Face ID / passcode (default `"Unlock to reveal"`).
+    ///   - lockBackgroundColor: Locked-screen background, behind the perforation (default `.white`).
+    ///   - lockPatternColor: Locked-screen blue-noise perforation color (default `.black`).
+    ///   - lockIconBackgroundColor: Fill of the small square behind the lock icon (default `.white`).
+    ///   - lockIconColor: Lock icon color (default `.black`).
     ///   - onStateChange: Called with `true` when the overlay becomes (mostly) closed, `false` when it reopens.
-    ///   - onAmbientLux: Reports the ARKit ambient light estimate (lux) while eye tracking is on.
+    ///   - onAmbientLux: Reports the ARKit ambient light estimate (lux) while gaze is active.
     func privacyBlinds(
         cover: PrivacyCover = .black,
         enabled: Bool = true,
@@ -84,9 +90,15 @@ public extension View {
         maskRevealHeight: CGFloat = 70,
         maskRevealFeather: CGFloat = 18,
         maskCover: PrivacyCover = .black,
-        eyeTracking: Bool = false,
-        eyeTrackingMinLux: Double = 450,
-        eyeTrackingResumeLux: Double = 600,
+        authenticatedGaze: Bool = false,
+        gazeMinLux: Double = 450,
+        gazeResumeLux: Double = 600,
+        relockSeconds: Double = 10,
+        unlockReason: String = "Unlock to reveal",
+        lockBackgroundColor: Color = .white,
+        lockPatternColor: Color = .black,
+        lockIconBackgroundColor: Color = .white,
+        lockIconColor: Color = .black,
         onStateChange: ((Bool) -> Void)? = nil,
         onAmbientLux: ((Double) -> Void)? = nil
     ) -> some View {
@@ -105,9 +117,15 @@ public extension View {
             openThresholdDeg: openThresholdDegrees,
             closeThresholdDeg: closeThresholdDegrees,
             maxViewAngleDeg: maxViewAngleDegrees,
-            eyeTracking: eyeTracking,
-            eyeTrackingMinLux: eyeTrackingMinLux,
-            eyeTrackingResumeLux: eyeTrackingResumeLux,
+            authenticatedGaze: authenticatedGaze,
+            gazeMinLux: gazeMinLux,
+            gazeResumeLux: gazeResumeLux,
+            relockSeconds: relockSeconds,
+            unlockReason: unlockReason,
+            lockBackgroundColor: lockBackgroundColor,
+            lockPatternColor: lockPatternColor,
+            lockIconBackgroundColor: lockIconBackgroundColor,
+            lockIconColor: lockIconColor,
             onStateChange: onStateChange,
             onAmbientLux: onAmbientLux
         ))

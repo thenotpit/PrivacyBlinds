@@ -103,32 +103,44 @@ follows your finger, and doesn't block scrolling. Size it with `maskRevealHeight
 > size, viewing distance, and the camera — validate it with a real camera before relying on it. It
 > reduces capture fidelity; it is not a guarantee.
 
-### Eye tracking (look-away gate)
+### Authenticated gaze (Face ID + eye tracking)
 
-Opt in and the overlay *also* closes when you look away from the screen — combined with the pose gate,
-so it closes on **tilt past the threshold OR looking away**, whichever comes first:
+Opt in to a **lock/unlock** layer with on-device eye tracking. The view starts **locked** — a
+perforated blue-noise cover with a lock glyph; tapping it prompts Face ID (→ passcode). Once
+unlocked, pose + gaze gate as normal, and it **re-locks** when left covered or backgrounded.
 
 ```swift
-SecretView().privacyBlinds(cover: .black, eyeTracking: true)
+SecretView().privacyBlinds(cover: .black, authenticatedGaze: true)
 ```
 
-- Uses the **TrueDepth front camera** via ARKit face tracking, entirely **on-device** — no frames are
-  stored or transmitted. The session starts only when `eyeTracking` is `true`, and starting it
-  prompts for camera permission, so **the host app must declare an `NSCameraUsageDescription`**.
-- Detects both **eye movement and head turns** (gaze is measured relative to the device, so rotating
-  your whole body while still facing the screen does *not* close it). Blinks are ignored.
-- The gaze close is **instant (binary)**, independent of the tilt sweep — so a slow eye-roll can't
-  ride the cover partway and a noisy estimate can't leave it half-closed. (Tilt keeps the smooth sweep.)
-- **Fails safe:** no TrueDepth camera or permission denied → it silently falls back to pose-only
-  gating (never forces itself shut or locks you out). In **low light** gaze is suspended the same way
-  (configurable via `eyeTrackingMinLux` / `eyeTrackingResumeLux`), with pose gating carrying on. Read
-  the live value through `onAmbientLux` if you want to tune it.
-- While the session runs, ARKit also supplies the device pose (it suspends a separate `CMMotionManager`),
-  so tilt gating and drift correction keep working with eye tracking on.
+The states:
 
-> Scope note: ARKit gaze is good for **coarse "looking at the screen vs. away."** It is *not* precise
-> enough to track exactly where on the screen you're looking (that needs dedicated eye-tracking
-> hardware), so the overlay uses it only as a gate, not to position anything.
+1. **Locked** (resting): opaque perforated cover + lock icon, camera off. Tap → authenticate.
+2. **Authenticating:** `LocalAuthentication` `.deviceOwnerAuthentication` — **Face ID / Touch ID,
+   falling back to the device passcode**. Requires an `NSFaceIDUsageDescription` in the host app.
+3. **Warming up:** after auth, the privacy texture "calibrates" (its perforation breathes in place)
+   while ARKit acquires your face — the content stays covered, so a quick look-away can't expose it.
+4. **Unlocked:** content reveals only while held in the reading pose **and** looked at. Tilts / quick
+   look-aways do a transient cover (look back → revealed, no re-auth). The gaze close is **instant
+   (binary)** — a slow eye-roll can't ride it partway.
+
+**Re-lock** (back to Face ID) happens after the view has been **continuously covered for
+`relockSeconds`** (default 10) — driven by gaze in good light, or by pose in the dark — and on **app
+backgrounding** (which also covers the app-switcher snapshot).
+
+- Everything is **on-device**; no frames are stored or transmitted. Needs an `NSCameraUsageDescription`
+  (camera) and `NSFaceIDUsageDescription` (Face ID) in the host app.
+- Gaze is measured **relative to the device**, so turning your whole body while still facing the
+  screen does *not* close it; blinks are ignored.
+- **Fails safe:** no TrueDepth camera → degrades to Face-ID lock + pose-only. In **low light** gaze
+  suspends (configurable via `gazeMinLux` / `gazeResumeLux`) and pose carries the gate; Face ID itself
+  works in the dark. Read the live lux via `onAmbientLux`.
+- The locked-screen colors are configurable (`lockBackgroundColor`, `lockPatternColor`,
+  `lockIconBackgroundColor`, `lockIconColor`).
+
+> Scope note: ARKit gaze is good for **coarse "looking at the screen vs. away,"** not precise
+> on-screen gaze, and it is **not** identity-aware — it gates on "a face is looking," not "the owner
+> is looking." Face ID is the identity check; gaze is the attention check.
 
 ### Tuning
 
@@ -136,7 +148,7 @@ SecretView().privacyBlinds(cover: .black, eyeTracking: true)
 |---|---|---|
 | `cover` | `.black` | Strip fill: `.black`, `.color(Color)`, or `.image(Image)` |
 | `enabled` | `true` | Master on/off |
-| `stripWidth` | `2.0` | Lens-strip width in points; widen for chunkier venetian slats |
+| `stripWidth` | `2.0` | Strip width in points; widen for chunkier venetian slats |
 | `sweep` | `1.0` | 0 = uniform per-strip fade, 1 = full swipe-over fill |
 | `transition` | `0.75` | Sweep edge softness |
 | `directionalSweep` | `0.5` | How strongly the close cascades in the tilt direction (0 = lockstep) |
@@ -148,9 +160,15 @@ SecretView().privacyBlinds(cover: .black, eyeTracking: true)
 | `maskRevealHeight` | `70` | Height of the touch-following reading band, points |
 | `maskRevealFeather` | `18` | Soft edge of the reading band, points |
 | `maskCover` | `.black` | Mask pattern appearance, independent of the blinds `cover` |
-| `eyeTracking` | `false` | Also close when the user looks away (TrueDepth, on-device, opt-in) |
-| `eyeTrackingMinLux` | `450` | Suspend gaze below this ambient light (lux); falls back to pose-only |
-| `eyeTrackingResumeLux` | `600` | Resume gaze above this ambient light (lux); hysteresis band |
+| `authenticatedGaze` | `false` | Face ID lock/unlock + on-device eye tracking (opt-in) |
+| `gazeMinLux` | `450` | Suspend gaze below this ambient light (lux); falls back to pose-only |
+| `gazeResumeLux` | `600` | Resume gaze above this ambient light (lux); hysteresis band |
+| `relockSeconds` | `10` | Re-lock after the view is continuously covered this long |
+| `unlockReason` | `"Unlock to reveal"` | Prompt text shown by Face ID / passcode |
+| `lockBackgroundColor` | `.white` | Locked-screen background behind the perforation |
+| `lockPatternColor` | `.black` | Locked-screen blue-noise perforation color |
+| `lockIconBackgroundColor` | `.white` | Fill of the square behind the lock icon |
+| `lockIconColor` | `.black` | Lock icon color |
 
 Re-center the reading pose with a **two-finger triple-tap** on the protected view.
 

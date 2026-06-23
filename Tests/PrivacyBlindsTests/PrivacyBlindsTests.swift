@@ -134,23 +134,130 @@ import simd
         #expect(gate.away == 1)
     }
 
-    @Test func enablingWhileLookingAwayStaysClosedThenAnchorsOnScreen() {
+    @Test func capturesBaselineOnlyWhenLookingAtScreen() {
         var gate = GazeGate()
-        // Enabled while looking away: large screenAngle → no baseline captured, stays closed.
+        // Enabled while looking away: no baseline captured yet → stay OPEN through warm-up (avoids
+        // both the black flash and capturing a skewed/inverted baseline).
         gate.apply(reading(SIMD3(1, 0, 0), screenAngle: 1.2))
-        #expect(gate.away == 1)
-        // Look back at the screen: small screenAngle → baseline captured here → open.
+        #expect(gate.away == 0)
+        // Look at the screen → baseline captured here → open.
         gate.apply(reading(SIMD3(0, 0, 1), screenAngle: 0.1))
+        #expect(gate.away == 0)
+        // Now look away → closes. Correctly oriented (not inverted), proving the baseline was the
+        // looking-at-screen frame, not the looking-away one.
+        gate.apply(reading(SIMD3(sin(0.5), 0, cos(0.5))))
+        #expect(gate.away == 1)
+    }
+
+    @Test func defersBaselineUntilHorizontallyCentered() {
+        var gate = GazeGate()
+        // Within the cone but horizontally turned → skewed; defer capture, stay open through warm-up.
+        gate.apply(reading(SIMD3(0.3, 0, 1), screenAngle: 0.2, horizontalOffset: 0.4))
+        #expect(gate.away == 0)
+        // Now horizontally centered → captures an unskewed baseline → open.
+        gate.apply(reading(SIMD3(0, 0, 1), screenAngle: 0.12, horizontalOffset: 0.0))
+        #expect(gate.away == 0)
+        // And a clear look-away from that unskewed baseline closes it.
+        gate.apply(reading(SIMD3(sin(0.5), 0, cos(0.5))))
+        #expect(gate.away == 1)
+    }
+
+    @Test func staysOpenWhileTrackingNotYetAcquired() {
+        var gate = GazeGate()
+        // Camera warm-up: not tracked yet, before any baseline → open (no flash on start/unlock).
+        gate.apply(reading(SIMD3(0, 0, 1), tracked: false))
         #expect(gate.away == 0)
     }
 
-    @Test func enablingWhileTurnedDefersUntilHorizontallyCentered() {
+    @Test func readyTracksWarmUp() {
         var gate = GazeGate()
-        // Within the screen cone but horizontally turned right → skewed; defer capture, stay closed.
-        gate.apply(reading(SIMD3(0.3, 0, 1), screenAngle: 0.2, horizontalOffset: 0.4))
-        #expect(gate.away == 1)
-        // Now horizontally centered on the device → captures an unskewed baseline → open.
-        gate.apply(reading(SIMD3(0, 0, 1), screenAngle: 0.12, horizontalOffset: 0.0))
-        #expect(gate.away == 0)
+        #expect(gate.ready == false)                                   // fresh → still warming up
+        gate.apply(reading(SIMD3(0, 0, 1), tracked: false))            // camera not acquired yet
+        #expect(gate.ready == false)                                   // still warming
+        gate.apply(reading(SIMD3(0, 0, 1)))                            // baseline captured → live
+        #expect(gate.ready == true)
+    }
+
+    @Test func lowLightEndsWarmUp() {
+        var gate = GazeGate()
+        gate.apply(reading(SIMD3(0, 0, 1), lux: 100))                  // too dark → pose-only is live
+        #expect(gate.ready == true)
+    }
+
+    @Test func recenterKeepsReadyButResetClears() {
+        var gate = GazeGate()
+        gate.apply(reading(SIMD3(0, 0, 1)))                            // become ready
+        #expect(gate.ready == true)
+        gate.recenter()                                                // mid-session re-center
+        #expect(gate.ready == true)                                    // must NOT replay the warm-up
+        gate.reset()                                                   // full stop
+        #expect(gate.ready == false)
+    }
+}
+
+/// Authenticated-gaze lock/unlock/re-lock state machine, driven with fakes.
+@MainActor
+@Suite struct AuthGazeTests {
+
+    final class FakePose: PoseSource {
+        var listener: ((MotionReading) -> Void)?
+        func addListener(_ listener: @escaping (MotionReading) -> Void) -> UUID { self.listener = listener; return UUID() }
+        func removeListener(_ id: UUID) { listener = nil }
+    }
+    final class FakeGaze: GazeSource {
+        var listener: ((GazeReading) -> Void)?
+        func addListener(_ listener: @escaping (GazeReading) -> Void) -> UUID { self.listener = listener; return UUID() }
+        func removeListener(_ id: UUID) { listener = nil }
+    }
+    final class FakeAuth: Authenticating {
+        var succeed = true
+        private(set) var calls = 0
+        func authenticate(reason: String, completion: @escaping (Bool) -> Void) { calls += 1; completion(succeed) }
+    }
+
+    private func makeModel(_ auth: FakeAuth = FakeAuth()) -> PrivacyLensModel {
+        PrivacyLensModel(pose: FakePose(), gaze: FakeGaze(), authenticator: auth)
+    }
+
+    @Test func startsLockedInAuthenticatedMode() {
+        let model = makeModel()
+        model.enterAuthenticatedMode(minLux: 0, resumeLux: 0)
+        #expect(model.lockState == .locked)
+    }
+
+    @Test func unlocksOnAuthSuccess() {
+        let auth = FakeAuth()
+        let model = makeModel(auth)
+        model.enterAuthenticatedMode(minLux: 0, resumeLux: 0)
+        model.beginUnlock(reason: "x")
+        #expect(auth.calls == 1)
+        #expect(model.lockState == .unlocked)
+    }
+
+    @Test func staysLockedOnAuthFailure() {
+        let auth = FakeAuth(); auth.succeed = false
+        let model = makeModel(auth)
+        model.enterAuthenticatedMode(minLux: 0, resumeLux: 0)
+        model.beginUnlock(reason: "x")
+        #expect(model.lockState == .locked)
+    }
+
+    @Test func relockReturnsToLocked() {
+        let model = makeModel()
+        model.enterAuthenticatedMode(minLux: 0, resumeLux: 0)
+        model.beginUnlock(reason: "x")
+        #expect(model.lockState == .unlocked)
+        model.relock()
+        #expect(model.lockState == .locked)
+    }
+
+    @Test func unlockIgnoredWhenNotLocked() {
+        let auth = FakeAuth()
+        let model = makeModel(auth)
+        model.enterAuthenticatedMode(minLux: 0, resumeLux: 0)
+        model.beginUnlock(reason: "x")        // → unlocked
+        model.beginUnlock(reason: "x")        // ignored (already unlocked)
+        #expect(auth.calls == 1)
+        #expect(model.lockState == .unlocked)
     }
 }
