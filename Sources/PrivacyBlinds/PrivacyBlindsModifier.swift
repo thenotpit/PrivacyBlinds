@@ -89,7 +89,12 @@ final class PrivacyLensModel {
                 if !self.usingARPose { self.usingARPose = true; self.poseGate.reset() }
                 self.poseGate.apply(roll: reading.roll, pitch: reading.pitch, now: CACurrentMediaTime())
                 self.publishPose()
-                self.gazeGate.apply(reading)
+                if reading.gazeReliable {
+                    self.gazeGate.apply(reading)
+                } else {
+                    // Too dark to trust gaze → suspend it and gate on pose only (don't force closed).
+                    self.gazeGate.reset()
+                }
                 self.publishGaze()
             }
         }

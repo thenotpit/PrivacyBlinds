@@ -85,7 +85,7 @@ import simd
                          screenAngle: Float = 0.1, horizontalOffset: Float = 0) -> GazeReading {
         GazeReading(isTracked: tracked, unavailable: false, gazeDir: simd_normalize(dir),
                     roll: 0, pitch: 0, isBlinking: blinking, screenAngle: screenAngle,
-                    horizontalOffset: horizontalOffset)
+                    horizontalOffset: horizontalOffset, gazeReliable: true)
     }
 
     @Test func lookingAtBaselineIsOpen() {

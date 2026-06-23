@@ -121,7 +121,8 @@ SecretView().privacyBlinds(cover: .black, eyeTracking: true)
 - Detects both **eye movement and head turns** (gaze is measured relative to the device, so rotating
   your whole body while still facing the screen does *not* close it). Blinks are ignored.
 - **Fails safe:** no TrueDepth camera or permission denied → it silently falls back to pose-only
-  gating (never forces itself shut or locks you out).
+  gating (never forces itself shut or locks you out). In **low light** (where the gaze estimate is
+  unreliable) gaze is suspended the same way, with pose gating carrying on.
 - While the session runs, ARKit also supplies the device pose (it suspends a separate `CMMotionManager`),
   so tilt gating and drift correction keep working with eye tracking on.
 
