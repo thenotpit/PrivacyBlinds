@@ -28,14 +28,23 @@ struct GazeGate {
     private(set) var away: Float = 0
     /// Signed horizontal look-away direction (drives the sweep when gaze is the dominant closer).
     private(set) var direction: Float = 0
+    /// True once gaze protection is live this session: a baseline has been captured, OR low light has
+    /// pushed us to pose-only. Used to hold a "warming up" cover until tracking is actually online
+    /// (so a post-unlock look-away can't expose content during the ~0.5–1s ARKit warm-up).
+    private(set) var ready = false
 
     private var referenceGaze: SIMD3<Float>?
     private var needsCapture = true
     private var closedState = false   // binary close state (hysteresis)
     private var luxReliable = true    // low-light state (hysteresis)
 
-    /// Re-baseline the "looking at the screen" gaze on the next tracked frame (keeps current output).
-    mutating func recenter() { needsCapture = true }
+    /// Re-baseline on the next tracked frame; stay open until then (no flash mid-reading). Does NOT
+    /// clear `ready` — a deliberate mid-session re-center shouldn't replay the warm-up graphic.
+    mutating func recenter() {
+        needsCapture = true
+        away = 0
+        closedState = false
+    }
 
     /// Full clear (on stop / when gaze becomes unavailable).
     mutating func reset() {
@@ -45,6 +54,7 @@ struct GazeGate {
         direction = 0
         closedState = false
         luxReliable = true
+        ready = false
     }
 
     mutating func apply(_ reading: GazeReading) {
@@ -57,27 +67,37 @@ struct GazeGate {
             away = 0
             closedState = false
             needsCapture = true
+            ready = true        // low light → pose-only is the live protection; don't keep warming
             return
         }
 
+        // Until a baseline is captured we're "warming up" (the camera takes ~0.5–1s to acquire the
+        // face). Stay OPEN through warm-up — biasing closed here is what caused the black flash on
+        // start/unlock. Capture the baseline only when looking squarely at the device (within the
+        // screen cone AND horizontally centered); a not-yet-centered / not-yet-tracked frame just
+        // keeps us open until a good one arrives.
+        if needsCapture {
+            if reading.isTracked, !reading.isBlinking,
+               reading.screenAngle < screenCone, abs(reading.horizontalOffset) < captureHorizontalTol {
+                referenceGaze = reading.gazeDir
+                needsCapture = false
+                closedState = false
+                ready = true        // tracking is live → end warm-up
+                away = 0
+                direction = reading.horizontalOffset
+            } else {
+                away = 0
+                closedState = false
+            }
+            return
+        }
+
+        // Baseline established → gate for real.
         if !reading.isTracked {
-            away = 1; closedState = true   // face not in view (turned fully away) → closed
+            away = 1; closedState = true   // face left view after acquiring → looking away
             return
         }
         if reading.isBlinking { return }   // gaze spikes mid-blink — hold the last state
-
-        if needsCapture {
-            // Only anchor the baseline when looking squarely at the device: within the screen cone
-            // (rejects enabling while looking away) AND horizontally centered (rejects a slight turn
-            // that would bias the neutral). Until then, report closed — privacy-first.
-            guard reading.screenAngle < screenCone,
-                  abs(reading.horizontalOffset) < captureHorizontalTol else {
-                away = 1; closedState = true; return
-            }
-            referenceGaze = reading.gazeDir
-            needsCapture = false
-            closedState = false
-        }
         guard let ref = referenceGaze else { return }
 
         // Binary slam with angle hysteresis: cross closeAngle → closed; drop under openAngle → open.
