@@ -44,13 +44,15 @@ as a "reveal only when held just-so" gate / glance-deterrent, not a guarantee ag
 - iOS 17.0+ (uses SwiftUI `layerEffect` + stitchable Metal shaders)
 - Xcode 26+ / Swift 6 toolchain
 - A real device for the motion gating (the Simulator has no device motion)
+- Eye tracking (optional) needs a TrueDepth front camera (iPhone X+) and an `NSCameraUsageDescription`
+  in the host app's Info.plist; it degrades gracefully to pose-only where unavailable
 
 ## Installation
 
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/thenotpit/PrivacyBlinds.git", from: "0.2.0")
+.package(url: "https://github.com/thenotpit/PrivacyBlinds.git", from: "0.3.0")
 ```
 
 …then add `"PrivacyBlinds"` to your target's dependencies. Or in Xcode: **File ▸ Add Package
@@ -104,6 +106,29 @@ follows your finger, and doesn't block scrolling. Size it with `maskRevealHeight
 > size, viewing distance, and the camera — validate it with a real camera before relying on it. It
 > reduces capture fidelity; it is not a guarantee.
 
+### Eye tracking (look-away gate)
+
+Opt in and the lens *also* closes when you look away from the screen — combined with the pose gate,
+so it closes on **tilt past the threshold OR looking away**, whichever comes first:
+
+```swift
+SecretView().privacyBlinds(cover: .black, eyeTracking: true)
+```
+
+- Uses the **TrueDepth front camera** via ARKit face tracking, entirely **on-device** — no frames are
+  stored or transmitted. The session starts only when `eyeTracking` is `true`, and starting it
+  prompts for camera permission, so **the host app must declare an `NSCameraUsageDescription`**.
+- Detects both **eye movement and head turns** (gaze is measured relative to the device, so rotating
+  your whole body while still facing the screen does *not* close it). Blinks are ignored.
+- **Fails safe:** no TrueDepth camera or permission denied → it silently falls back to pose-only
+  gating (never forces itself shut or locks you out).
+- While the session runs, ARKit also supplies the device pose (it suspends a separate `CMMotionManager`),
+  so tilt gating and drift correction keep working with eye tracking on.
+
+> Scope note: ARKit gaze is good for **coarse "looking at the screen vs. away."** It is *not* precise
+> enough to track exactly where on the screen you're looking (that needs dedicated eye-tracking
+> hardware), so the lens uses it only as a gate, not to position anything.
+
 ### Tuning
 
 | Parameter | Default | What it does |
@@ -122,16 +147,17 @@ follows your finger, and doesn't block scrolling. Size it with `maskRevealHeight
 | `maskRevealHeight` | `70` | Height of the touch-following reading band, points |
 | `maskRevealFeather` | `18` | Soft edge of the reading band, points |
 | `maskCover` | `.black` | Mask pattern appearance, independent of the blinds `cover` |
+| `eyeTracking` | `false` | Also close when the user looks away (TrueDepth, on-device, opt-in) |
 
 Re-center the reading pose with a **two-finger triple-tap** on the protected view.
 
 ## Status
 
 Reveal/cover sweep with black / color / image covers; multi-axis (roll + pitch) pose gating with
-settle-on-stillness anchoring and a two-finger triple-tap re-center; and an optional perforated
-blue-noise privacy mask with a touch-following reading band. Not yet: custom-cover persistence,
-face-down deviation term, app-switcher snapshot cover, Reduce Motion / always-reveal accessibility
-override, declared-orientation landscape sweep mapping, and a live-tuning sheet.
+settle-on-stillness anchoring and a two-finger triple-tap re-center; an optional perforated
+blue-noise privacy mask with a touch-following reading band; and optional eye-tracking look-away
+gating (on-device, opt-in). Not yet: custom-cover persistence, face-down deviation term, app-switcher
+snapshot cover, Reduce Motion / always-reveal accessibility override, and a live-tuning sheet.
 
 ## License
 

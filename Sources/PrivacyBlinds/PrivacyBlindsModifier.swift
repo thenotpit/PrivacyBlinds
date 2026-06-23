@@ -9,6 +9,7 @@
 
 import SwiftUI
 import UIKit
+import simd
 
 // MARK: - Motion model
 
@@ -26,10 +27,26 @@ final class PrivacyLensModel {
     /// pattern differs every time (but stays static while shown — see the shader note on why).
     private(set) var maskSeed = SIMD2<Float>(0, 0)
 
+    /// 0 = looking at the screen .. 1 = looking away (a close amount from gaze). Only meaningful when
+    /// eye tracking is on; 0 otherwise.
+    private(set) var gazeAway: Float = 0
+    /// Signed horizontal look-away direction (drives the sweep when gaze is the closer).
+    private(set) var gazeDirection: Float = 0
+
     private var referenceRoll: Float?
     private var referencePitch: Float?
     private var needsCapture = true
     private var token: UUID?
+    private var gazeToken: UUID?
+    private var referenceGaze: SIMD3<Float>?
+    private var needsGazeCapture = true
+
+    // Gaze thresholds: angle (radians) the combined head+eye gaze has turned from the captured
+    // "looking at the screen" baseline. Tuned on device.
+    // Set just beyond the screen's own angular extent (~10–13° from center at reading distance) so
+    // looking at the screen's edges doesn't start closing — only looking past the screen does.
+    private let gazeOpenAngle: Float = 0.20   // ~11° — within this → still on the screen
+    private let gazeCloseAngle: Float = 0.38  // ~22° — beyond this → looking away (fully closed)
 
     // Settle detection: when a (re)capture is pending we wait until the device is held still before
     // anchoring the reading pose — so a re-center lands on where you actually read, not mid-motion.
@@ -41,9 +58,11 @@ final class PrivacyLensModel {
     private let settleFrames = 15                   // ~0.25s of stillness before we anchor
     private let maxPendingFrames = 150              // ~2.5s safety valve so you can't get stuck closed
 
+    // While the AR (eye-tracking) session runs it suspends CMMotionManager, so pose comes from ARKit.
+    private var usingARPose = false
+
     func start() {
-        needsCapture = true
-        pendingFrames = 0
+        resetAnchor()
         // Fresh mask pattern each appearance.
         maskSeed = SIMD2<Float>(.random(in: 0..<4096), .random(in: 0..<4096))
         guard token == nil else { return }
@@ -53,46 +72,115 @@ final class PrivacyLensModel {
             // and update synchronously — no async hop, no motion lag.
             MainActor.assumeIsolated {
                 guard let self else { return }
-
-                // Track how still the device is, frame to frame, across both axes.
-                if let lr = self.lastRoll, let lp = self.lastPitch {
-                    let moved = abs(wrapToPi(reading.roll - lr)) + abs(wrapToPi(reading.pitch - lp))
-                    self.stillFrames = moved < self.stillDeltaThreshold ? self.stillFrames + 1 : 0
-                }
-                self.lastRoll = reading.roll
-                self.lastPitch = reading.pitch
-
-                if self.needsCapture {
-                    // Anchor once the user has settled (held still) — or force it after the safety
-                    // timeout so a fidgety hold can't leave the cover stuck closed. Until then we keep
-                    // measuring against the previous anchor (so the cover stays closed mid-reposition).
-                    self.pendingFrames += 1
-                    if self.stillFrames >= self.settleFrames || self.pendingFrames >= self.maxPendingFrames {
-                        self.referenceRoll = reading.roll
-                        self.referencePitch = reading.pitch
-                        self.needsCapture = false
-                        self.pendingFrames = 0
-                    }
-                }
-
-                guard let refRoll = self.referenceRoll, let refPitch = self.referencePitch else { return }
-                self.rollDeviation = wrapToPi(reading.roll - refRoll)
-                self.pitchDeviation = wrapToPi(reading.pitch - refPitch)
+                guard !self.usingARPose else { return }   // ARKit is driving pose while it runs
+                self.applyPose(roll: reading.roll, pitch: reading.pitch)
             }
         }
+    }
+
+    /// Settle detection + deviation, shared by the MotionManager and ARKit pose sources.
+    private func applyPose(roll: Float, pitch: Float) {
+        // Track how still the device is, frame to frame, across both axes.
+        if let lr = lastRoll, let lp = lastPitch {
+            let moved = abs(wrapToPi(roll - lr)) + abs(wrapToPi(pitch - lp))
+            stillFrames = moved < stillDeltaThreshold ? stillFrames + 1 : 0
+        }
+        lastRoll = roll
+        lastPitch = pitch
+
+        if needsCapture {
+            // Anchor once the user has settled (held still) — or force it after the safety timeout so a
+            // fidgety hold can't leave the cover stuck closed. Until then we keep measuring against the
+            // previous anchor (so the cover stays closed mid-reposition).
+            pendingFrames += 1
+            if stillFrames >= settleFrames || pendingFrames >= maxPendingFrames {
+                referenceRoll = roll
+                referencePitch = pitch
+                needsCapture = false
+                pendingFrames = 0
+            }
+        }
+
+        guard let refRoll = referenceRoll, let refPitch = referencePitch else { return }
+        rollDeviation = wrapToPi(roll - refRoll)
+        pitchDeviation = wrapToPi(pitch - refPitch)
+    }
+
+    /// Force a fresh settle + anchor (e.g. when the pose source switches between CoreMotion and ARKit,
+    /// whose absolute roll/pitch differ).
+    private func resetAnchor() {
+        needsCapture = true
+        pendingFrames = 0
+        stillFrames = 0
+        lastRoll = nil
+        lastPitch = nil
     }
 
     /// Re-capture the reading pose once the device next settles (held still). Triggered deliberately
     /// (two-finger triple-tap) — never automatically from motion, so incidental movement can't reveal
     /// the content.
     func recenter() {
-        needsCapture = true
-        pendingFrames = 0
+        resetAnchor()
+        needsGazeCapture = true   // re-baseline the "looking at the screen" gaze too
+    }
+
+    /// Begin gaze tracking (opt-in). Starts the shared front-camera session, which prompts for camera
+    /// permission the first time. While it runs, ARKit also supplies the device pose (it suspends
+    /// CMMotionManager).
+    func startGaze() {
+        needsGazeCapture = true
+        guard gazeToken == nil else { return }
+        gazeToken = EyeTracker.shared.addListener { [weak self] reading in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+
+                if reading.unavailable {
+                    // No TrueDepth / permission denied → AR drives nothing; stay on CoreMotion pose.
+                    if self.usingARPose { self.usingARPose = false; self.resetAnchor() }
+                    self.gazeAway = 0
+                    self.gazeDirection = 0
+                    return
+                }
+
+                // AR session is delivering frames → it drives pose (CMMotionManager is suspended).
+                if !self.usingARPose { self.usingARPose = true; self.resetAnchor() }
+                self.applyPose(roll: reading.roll, pitch: reading.pitch)
+
+                // --- Gaze ---
+                if !reading.isTracked {
+                    self.gazeAway = 1   // face not in view (e.g. turned fully away) → looking away
+                    return
+                }
+                // Mid-blink the gaze estimate spikes — hold the last state so a blink doesn't flash closed.
+                if reading.isBlinking { return }
+                // Capture the current gaze as "looking at the screen" on the first frame after start /
+                // re-center (the user is looking at the screen then).
+                if self.needsGazeCapture {
+                    self.referenceGaze = reading.gazeDir
+                    self.needsGazeCapture = false
+                }
+                guard let ref = self.referenceGaze else { return }
+                // Angle the combined head+eye gaze has turned from that baseline.
+                let cosA = max(-1, min(1, simd_dot(reading.gazeDir, ref)))
+                self.gazeAway = smoothstep(self.gazeOpenAngle, self.gazeCloseAngle, acos(cosA))
+                self.gazeDirection = reading.gazeDir.x - ref.x   // signed horizontal hint for the sweep
+            }
+        }
+    }
+
+    func stopGaze() {
+        if let gazeToken { EyeTracker.shared.removeListener(gazeToken) }
+        gazeToken = nil
+        gazeAway = 0
+        gazeDirection = 0
+        referenceGaze = nil
+        if usingARPose { usingARPose = false; resetAnchor() }   // CoreMotion resumes → re-anchor
     }
 
     func stop() {
         if let token { MotionManager.shared.removeListener(token) }
         token = nil
+        stopGaze()
     }
 }
 
@@ -117,6 +205,7 @@ public struct PrivacyBlindsModifier: ViewModifier {
     var openThresholdDeg: Float = 8
     var closeThresholdDeg: Float = 16
     var maxViewAngleDeg: Float = 20
+    var eyeTracking: Bool = false   // opt-in: also close when the user looks away (front camera)
     var onStateChange: ((Bool) -> Void)?
 
     @State private var model = PrivacyLensModel()
@@ -151,19 +240,29 @@ public struct PrivacyBlindsModifier: ViewModifier {
         return (r * r + p * p).squareRoot()
     }
 
-    /// 0 = fully open/revealed .. 1 = fully closed/covered.
-    private var closeProgress: Float {
+    /// Pose-only close amount from the combined roll+pitch deviation.
+    private var poseCloseProgress: Float {
         let open = openThresholdDeg * .pi / 180
         let close = closeThresholdDeg * .pi / 180
         return smoothstep(open, close, deviationMagnitude)
     }
 
-    /// Signed view angle (radians) driving the closing-sweep direction. Both axes contribute so the
-    /// blinds come in from the side you tilt toward: roll does left/right, pitch maps forward → left
-    /// and back → right. Summing the signed deviations means a real pitch angle dominates the small
-    /// incidental roll you pick up when tipping forward/back, so the direction is reliable.
+    /// 0 = fully open/revealed .. 1 = fully closed/covered. Closes on pose deviation OR (when eye
+    /// tracking is on) looking away — whichever is greater.
+    private var closeProgress: Float {
+        let pose = poseCloseProgress
+        guard eyeTracking else { return pose }
+        return max(pose, model.gazeAway)
+    }
+
+    /// Signed view angle (radians) driving the closing-sweep direction. Pose: roll does left/right,
+    /// pitch maps forward → left and back → right (summed). When eye tracking is the dominant closer,
+    /// the look-away direction drives the sweep instead.
     private var viewAngle: Float {
         let maxV = maxViewAngleDeg * .pi / 180
+        if eyeTracking && model.gazeAway > poseCloseProgress {
+            return max(-maxV, min(maxV, model.gazeDirection * maxV))
+        }
         let dir = model.rollDeviation + model.pitchDeviation
         return max(-maxV, min(maxV, dir))
     }
@@ -181,7 +280,7 @@ public struct PrivacyBlindsModifier: ViewModifier {
                 if enabled {
                     GeometryReader { geo in
                         coverLayer(size: geo.size, closeProgress: progress, viewAngle: angle,
-                                   revealY: Float(touch?.y ?? 0))
+                                   revealY: Float(touch?.y ?? 0), revealProgress: Double(revealProgress))
                             .overlay {
                                 // Observe touches to drive the reading band WITHOUT consuming them, so
                                 // the content underneath still scrolls. A window-level recognizer also
@@ -209,13 +308,17 @@ public struct PrivacyBlindsModifier: ViewModifier {
                     .allowsHitTesting(closed)
                 }
             }
-            .onAppear { model.start() }
+            .onAppear {
+                model.start()
+                if eyeTracking { model.startGaze() }
+            }
             .onDisappear { model.stop() }
+            .onChange(of: eyeTracking) { _, on in on ? model.startGaze() : model.stopGaze() }
             .onChange(of: closed) { _, newValue in onStateChange?(newValue) }
     }
 
     private func coverLayer(size: CGSize, closeProgress: Float, viewAngle: Float,
-                            revealY: Float) -> some View {
+                            revealY: Float, revealProgress: Double) -> some View {
         // Resolve the mask's own appearance (independent of the blinds cover).
         let maskUseImage: Float
         let maskColorValue: Color
@@ -244,7 +347,7 @@ public struct PrivacyBlindsModifier: ViewModifier {
                 revealY: revealY,
                 revealHalfHeight: Float(maskRevealHeight / 2),
                 revealFeather: Float(maskRevealFeather),
-                revealProgress: Double(revealProgress),
+                revealProgress: revealProgress,
                 blueNoise: Self.blueNoise,
                 maskUseImage: maskUseImage,
                 maskColor: maskColorValue,

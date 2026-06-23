@@ -60,6 +60,10 @@ public extension View {
     ///   - maskRevealFeather: Soft edge of the reading band in points (default `18`).
     ///   - maskCover: The mask pattern's appearance — `.black`, `.color`, or `.image` — independent of
     ///     the blinds `cover` (default `.black`).
+    ///   - eyeTracking: Opt-in. When `true`, also close the lens when the user looks away (TrueDepth
+    ///     front camera, on-device). Starting it prompts for camera permission — the host app must
+    ///     include an `NSCameraUsageDescription`. Falls back to pose-only if unsupported or denied.
+    ///     Default `false`.
     ///   - onStateChange: Called with `true` when the lens becomes (mostly) closed, `false` when it reopens.
     func privacyBlinds(
         cover: PrivacyCover = .black,
@@ -76,6 +80,7 @@ public extension View {
         maskRevealHeight: CGFloat = 70,
         maskRevealFeather: CGFloat = 18,
         maskCover: PrivacyCover = .black,
+        eyeTracking: Bool = false,
         onStateChange: ((Bool) -> Void)? = nil
     ) -> some View {
         modifier(PrivacyBlindsModifier(
@@ -93,6 +98,7 @@ public extension View {
             openThresholdDeg: openThresholdDegrees,
             closeThresholdDeg: closeThresholdDegrees,
             maxViewAngleDeg: maxViewAngleDegrees,
+            eyeTracking: eyeTracking,
             onStateChange: onStateChange
         ))
     }
