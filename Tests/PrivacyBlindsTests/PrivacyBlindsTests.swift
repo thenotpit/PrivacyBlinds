@@ -82,9 +82,10 @@ import simd
 @Suite struct GazeGateTests {
 
     private func reading(_ dir: SIMD3<Float>, tracked: Bool = true, blinking: Bool = false,
-                         screenAngle: Float = 0.1) -> GazeReading {
+                         screenAngle: Float = 0.1, horizontalOffset: Float = 0) -> GazeReading {
         GazeReading(isTracked: tracked, unavailable: false, gazeDir: simd_normalize(dir),
-                    roll: 0, pitch: 0, isBlinking: blinking, screenAngle: screenAngle)
+                    roll: 0, pitch: 0, isBlinking: blinking, screenAngle: screenAngle,
+                    horizontalOffset: horizontalOffset)
     }
 
     @Test func lookingAtBaselineIsOpen() {
@@ -123,6 +124,16 @@ import simd
         #expect(gate.away == 1)
         // Look back at the screen: small screenAngle → baseline captured here → open.
         gate.apply(reading(SIMD3(0, 0, 1), screenAngle: 0.1))
+        #expect(gate.away == 0)
+    }
+
+    @Test func enablingWhileTurnedDefersUntilHorizontallyCentered() {
+        var gate = GazeGate()
+        // Within the screen cone but horizontally turned right → skewed; defer capture, stay closed.
+        gate.apply(reading(SIMD3(0.3, 0, 1), screenAngle: 0.2, horizontalOffset: 0.4))
+        #expect(gate.away == 1)
+        // Now horizontally centered on the device → captures an unskewed baseline → open.
+        gate.apply(reading(SIMD3(0, 0, 1), screenAngle: 0.12, horizontalOffset: 0.0))
         #expect(gate.away == 0)
     }
 }

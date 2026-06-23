@@ -29,6 +29,10 @@ enum Tuning {
     /// baseline to be captured. Generous enough to cover the whole screen (incl. the top-camera
     /// offset), but rejects enabling eye tracking while looking away (which would invert the gate).
     static let gazeScreenCone: Float = 0.55   // ~31°
+    /// Max *horizontal* gaze offset (radians) from the device for the baseline to be captured. The
+    /// vertical camera offset is expected; horizontal skew is not, so requiring near-centered
+    /// horizontal gaze keeps a slight head/eye turn at enable time from biasing the neutral pose.
+    static let gazeCaptureHorizontalTol: Float = 0.17   // ~10°
 
     // MARK: Close-state reporting
     /// `closeProgress` past this is reported as "closed" (drives `onStateChange` + interaction lock).

@@ -35,9 +35,13 @@ struct GazeReading: Sendable {
     /// looking straight at the device, growing as the gaze leaves the screen. Used to validate that a
     /// "looking at screen" baseline is captured only when the user really is looking at the screen.
     var screenAngle: Float
+    /// Signed horizontal gaze offset (radians) from the direction-to-device (left/right). Used to
+    /// reject a skewed baseline (a slight turn at enable time) and to drive the closing sweep side.
+    var horizontalOffset: Float
 
     static let unsupported = GazeReading(isTracked: false, unavailable: true, gazeDir: .zero,
-                                         roll: 0, pitch: 0, isBlinking: false, screenAngle: 0)
+                                         roll: 0, pitch: 0, isBlinking: false, screenAngle: 0,
+                                         horizontalOffset: 0)
 }
 
 /// Abstraction over the gaze stream so the lens model can be driven (and tested) without ARKit.
@@ -138,14 +142,19 @@ final class EyeTracker: NSObject, ARSessionDelegate, GazeSource, @unchecked Send
             let toDevice = simd_normalize(cameraPos - facePos)
             let screenAngle = acos(max(-1, min(1, simd_dot(gazeWorld, toDevice))))
 
+            // Signed horizontal (azimuth) difference between gaze and the device direction, in the
+            // device frame. The shared atan2 formula cancels axis-sign conventions in the difference.
+            let toDeviceDir = simd_normalize(camRot.transpose * toDevice)
+            let horizontalOffset = wrapToPi(atan2(gazeDir.x, gazeDir.z) - atan2(toDeviceDir.x, toDeviceDir.z))
+
             let bs: (ARFaceAnchor.BlendShapeLocation) -> Float = { face.blendShapes[$0]?.floatValue ?? 0 }
             let isBlinking = (bs(.eyeBlinkLeft) + bs(.eyeBlinkRight)) * 0.5 > Tuning.blinkThreshold
 
             notify(GazeReading(isTracked: true, unavailable: false, gazeDir: gazeDir, roll: roll, pitch: pitch,
-                               isBlinking: isBlinking, screenAngle: screenAngle))
+                               isBlinking: isBlinking, screenAngle: screenAngle, horizontalOffset: horizontalOffset))
         } else {
             notify(GazeReading(isTracked: false, unavailable: false, gazeDir: .zero, roll: roll, pitch: pitch,
-                               isBlinking: false, screenAngle: 0))
+                               isBlinking: false, screenAngle: 0, horizontalOffset: 0))
         }
     }
 
