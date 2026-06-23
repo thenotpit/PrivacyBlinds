@@ -20,7 +20,8 @@ let package = Package(
         // The `.metal` shader in this target is compiled by SwiftPM into the target's
         // resource bundle (`default.metallib`), reached at runtime via `ShaderLibrary.bundle(.module)`.
         .target(
-            name: "PrivacyBlinds"
+            name: "PrivacyBlinds",
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "PrivacyBlindsTests",

@@ -16,6 +16,18 @@ import CoreMotion
 import simd
 import QuartzCore
 
+/// One frame of device pose the privacy lens reads.
+struct MotionReading: Sendable {
+    /// Side-to-side roll about the device long axis (Y), radians. Drift-free: gyro integration
+    /// corrected by the gravity complementary filter.
+    var roll: Float
+    /// Top-to-bottom pitch about the device short axis (X), radians. Read directly from gravity
+    /// (absolute, so inherently drift-free); 0 ≈ upright portrait, grows as the top tips away/toward.
+    var pitch: Float
+    /// Smoothed roll angular velocity, rad/s.
+    var rollVelocity: Float
+}
+
 /// One shared CoreMotion stream that every `privacyBlinds` overlay reads from.
 ///
 /// `@unchecked Sendable`: the gyro/gravity integration state is only ever touched on the internal
@@ -28,8 +40,8 @@ final class MotionManager: @unchecked Sendable {
 
     private let motionManager = CMMotionManager()
 
-    // Cards/overlays register here to receive (angle, velocity) updates; one stream feeds them all.
-    private var listeners: [UUID: (Float, Float) -> Void] = [:]
+    // Overlays register here to receive pose updates; one stream feeds them all.
+    private var listeners: [UUID: (MotionReading) -> Void] = [:]
 
     // Gravity complementary-filter correction strength per update (was LenticularSettings-driven).
     var gravityCorrectionGain: Float = 0.04
@@ -60,7 +72,7 @@ final class MotionManager: @unchecked Sendable {
 
     /// Register for motion updates. Keep the returned token and pass it to `removeListener` later.
     @discardableResult
-    func addListener(_ listener: @escaping (Float, Float) -> Void) -> UUID {
+    func addListener(_ listener: @escaping (MotionReading) -> Void) -> UUID {
         let id = UUID()
         listeners[id] = listener
         return id
@@ -70,8 +82,8 @@ final class MotionManager: @unchecked Sendable {
         listeners.removeValue(forKey: id)
     }
 
-    private func notifyListeners(angle: Float, velocity: Float) {
-        for listener in listeners.values { listener(angle, velocity) }
+    private func notifyListeners(_ reading: MotionReading) {
+        for listener in listeners.values { listener(reading) }
     }
 
     private func setupMotionUpdates() {
@@ -174,11 +186,17 @@ final class MotionManager: @unchecked Sendable {
                 self.accumulatedAngle += correction
             }
 
+            // Top-to-bottom pitch straight from gravity (no integration needed — gravity is an
+            // absolute reference). atan2 over the device's Y/Z gravity components: 0 ≈ upright
+            // portrait, positive as the top edge tips back (screen toward the ceiling), negative
+            // as it tips forward. Independent of roll, which lives in g.x.
+            let pitch = atan2(-Float(g.z), -Float(g.y))
+
             // Broadcast every frame so the gravity correction is reflected continuously.
             let outputAngle = self.accumulatedAngle
             let outputVelocity = self.smoothedVelocity
             DispatchQueue.main.async { [weak self] in
-                self?.notifyListeners(angle: outputAngle, velocity: outputVelocity)
+                self?.notifyListeners(MotionReading(roll: outputAngle, pitch: pitch, rollVelocity: outputVelocity))
             }
         }
     }
@@ -213,7 +231,8 @@ final class MotionManager: @unchecked Sendable {
                 let angleChange = abs(simulatedAngle - self.lastAngle)
                 if angleChange > 0.001 {
                     self.lastAngle = simulatedAngle
-                    self.notifyListeners(angle: simulatedAngle, velocity: 0.0)
+                    // Test mode: drive roll only, no pitch/velocity.
+                    self.notifyListeners(MotionReading(roll: simulatedAngle, pitch: 0, rollVelocity: 0))
                 }
             }
         }
