@@ -38,14 +38,13 @@ struct GazeReading: Sendable {
     /// Signed horizontal gaze offset (radians) from the direction-to-device (left/right). Used to
     /// reject a skewed baseline (a slight turn at enable time) and to drive the closing sweep side.
     var horizontalOffset: Float
-    /// False when ambient light is too low for the gaze estimate to be trusted — the lens then
-    /// suspends gaze and falls back to pose-only (AR still supplies pose). Distinct from `unavailable`,
-    /// which means the AR session itself isn't running.
-    var gazeReliable: Bool
+    /// ARKit's ambient light estimate (lux), or -1 when unknown. The gaze gate decides reliability
+    /// from this against its (configurable) low-light thresholds, and the host can surface it.
+    var ambientLux: Double
 
     static let unsupported = GazeReading(isTracked: false, unavailable: true, gazeDir: .zero,
                                          roll: 0, pitch: 0, isBlinking: false, screenAngle: 0,
-                                         horizontalOffset: 0, gazeReliable: false)
+                                         horizontalOffset: 0, ambientLux: -1)
 }
 
 /// Abstraction over the gaze stream so the lens model can be driven (and tested) without ARKit.
@@ -68,8 +67,6 @@ final class EyeTracker: NSObject, ARSessionDelegate, GazeSource, @unchecked Send
     private let session = ARSession()
     private var listeners: [UUID: (GazeReading) -> Void] = [:]
     private var running = false
-    /// Hysteretic low-light state (only touched on the main delegate queue).
-    private var gazeReliable = true
 
     private override init() { super.init() }
 
@@ -125,14 +122,8 @@ final class EyeTracker: NSObject, ARSessionDelegate, GazeSource, @unchecked Send
         let roll = asin(max(-1, min(1, gx)))
         let pitch = atan2(-gz, -gy)
 
-        // --- Low-light gate (hysteretic) ---
-        // Gaze estimation degrades in the dark; below the threshold we suspend gaze and let the lens
-        // fall back to pose-only. Pose stays AR-sourced (the session is still running).
+        // Ambient light (lux); the gaze gate decides reliability against its configurable thresholds.
         let ambientLux = frame.lightEstimate?.ambientIntensity ?? -1
-        if ambientLux >= 0 {
-            if ambientLux < Tuning.ambientLuxLow { gazeReliable = false }
-            else if ambientLux > Tuning.ambientLuxHigh { gazeReliable = true }
-        }
 
         // --- Gaze (when a face is present), expressed in the DEVICE frame ---
         // Combine head orientation + eye direction into a world-space gaze ray, then rotate it into
@@ -167,11 +158,10 @@ final class EyeTracker: NSObject, ARSessionDelegate, GazeSource, @unchecked Send
 
             notify(GazeReading(isTracked: true, unavailable: false, gazeDir: gazeDir, roll: roll, pitch: pitch,
                                isBlinking: isBlinking, screenAngle: screenAngle, horizontalOffset: horizontalOffset,
-                               gazeReliable: gazeReliable))
+                               ambientLux: ambientLux))
         } else {
             notify(GazeReading(isTracked: false, unavailable: false, gazeDir: .zero, roll: roll, pitch: pitch,
-                               isBlinking: false, screenAngle: 0, horizontalOffset: 0,
-                               gazeReliable: gazeReliable))
+                               isBlinking: false, screenAngle: 0, horizontalOffset: 0, ambientLux: ambientLux))
         }
     }
 

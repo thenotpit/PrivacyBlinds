@@ -61,10 +61,14 @@ public extension View {
     ///   - maskCover: The mask pattern's appearance — `.black`, `.color`, or `.image` — independent of
     ///     the blinds `cover` (default `.black`).
     ///   - eyeTracking: Opt-in. When `true`, also close the lens when the user looks away (TrueDepth
-    ///     front camera, on-device). Starting it prompts for camera permission — the host app must
-    ///     include an `NSCameraUsageDescription`. Falls back to pose-only if unsupported or denied.
+    ///     front camera, on-device). The gaze close is instant (binary), independent of the tilt sweep.
+    ///     Starting it prompts for camera permission — the host app must include an
+    ///     `NSCameraUsageDescription`. Falls back to pose-only if unsupported, denied, or too dark.
     ///     Default `false`.
+    ///   - eyeTrackingMinLux: Ambient light (lux) below which gaze is suspended (pose-only). Default `450`.
+    ///   - eyeTrackingResumeLux: Ambient light (lux) above which gaze resumes (hysteresis). Default `600`.
     ///   - onStateChange: Called with `true` when the lens becomes (mostly) closed, `false` when it reopens.
+    ///   - onAmbientLux: Reports the ARKit ambient light estimate (lux) while eye tracking is on.
     func privacyBlinds(
         cover: PrivacyCover = .black,
         enabled: Bool = true,
@@ -81,7 +85,10 @@ public extension View {
         maskRevealFeather: CGFloat = 18,
         maskCover: PrivacyCover = .black,
         eyeTracking: Bool = false,
-        onStateChange: ((Bool) -> Void)? = nil
+        eyeTrackingMinLux: Double = 450,
+        eyeTrackingResumeLux: Double = 600,
+        onStateChange: ((Bool) -> Void)? = nil,
+        onAmbientLux: ((Double) -> Void)? = nil
     ) -> some View {
         modifier(PrivacyBlindsModifier(
             cover: cover,
@@ -99,7 +106,10 @@ public extension View {
             closeThresholdDeg: closeThresholdDegrees,
             maxViewAngleDeg: maxViewAngleDegrees,
             eyeTracking: eyeTracking,
-            onStateChange: onStateChange
+            eyeTrackingMinLux: eyeTrackingMinLux,
+            eyeTrackingResumeLux: eyeTrackingResumeLux,
+            onStateChange: onStateChange,
+            onAmbientLux: onAmbientLux
         ))
     }
 }

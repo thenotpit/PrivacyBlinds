@@ -120,9 +120,12 @@ SecretView().privacyBlinds(cover: .black, eyeTracking: true)
   prompts for camera permission, so **the host app must declare an `NSCameraUsageDescription`**.
 - Detects both **eye movement and head turns** (gaze is measured relative to the device, so rotating
   your whole body while still facing the screen does *not* close it). Blinks are ignored.
+- The gaze close is **instant (binary)**, independent of the tilt sweep — so a slow eye-roll can't
+  ride the cover partway and a noisy estimate can't leave it half-closed. (Tilt keeps the smooth sweep.)
 - **Fails safe:** no TrueDepth camera or permission denied → it silently falls back to pose-only
-  gating (never forces itself shut or locks you out). In **low light** (where the gaze estimate is
-  unreliable) gaze is suspended the same way, with pose gating carrying on.
+  gating (never forces itself shut or locks you out). In **low light** gaze is suspended the same way
+  (configurable via `eyeTrackingMinLux` / `eyeTrackingResumeLux`), with pose gating carrying on. Read
+  the live value through `onAmbientLux` if you want to tune it.
 - While the session runs, ARKit also supplies the device pose (it suspends a separate `CMMotionManager`),
   so tilt gating and drift correction keep working with eye tracking on.
 
@@ -149,6 +152,8 @@ SecretView().privacyBlinds(cover: .black, eyeTracking: true)
 | `maskRevealFeather` | `18` | Soft edge of the reading band, points |
 | `maskCover` | `.black` | Mask pattern appearance, independent of the blinds `cover` |
 | `eyeTracking` | `false` | Also close when the user looks away (TrueDepth, on-device, opt-in) |
+| `eyeTrackingMinLux` | `450` | Suspend gaze below this ambient light (lux); falls back to pose-only |
+| `eyeTrackingResumeLux` | `600` | Resume gaze above this ambient light (lux); hysteresis band |
 
 Re-center the reading pose with a **two-finger triple-tap** on the protected view.
 

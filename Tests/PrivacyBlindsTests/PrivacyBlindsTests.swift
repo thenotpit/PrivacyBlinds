@@ -82,10 +82,11 @@ import simd
 @Suite struct GazeGateTests {
 
     private func reading(_ dir: SIMD3<Float>, tracked: Bool = true, blinking: Bool = false,
-                         screenAngle: Float = 0.1, horizontalOffset: Float = 0) -> GazeReading {
+                         screenAngle: Float = 0.1, horizontalOffset: Float = 0,
+                         lux: Double = 1000) -> GazeReading {
         GazeReading(isTracked: tracked, unavailable: false, gazeDir: simd_normalize(dir),
                     roll: 0, pitch: 0, isBlinking: blinking, screenAngle: screenAngle,
-                    horizontalOffset: horizontalOffset, gazeReliable: true)
+                    horizontalOffset: horizontalOffset, ambientLux: lux)
     }
 
     @Test func lookingAtBaselineIsOpen() {
@@ -94,20 +95,36 @@ import simd
         #expect(gate.away == 0)
     }
 
-    @Test func lookingAwayCloses() {
+    @Test func lookingAwaySlamsClosed() {
         var gate = GazeGate()
         gate.apply(reading(SIMD3(0, 0, 1)))                          // baseline
         gate.apply(reading(SIMD3(sin(0.5), 0, cos(0.5))))           // ~28° away → past closeAngle
-        #expect(gate.away > 0.9)
+        #expect(gate.away == 1)                                     // binary slam, not partial
+    }
+
+    @Test func closeIsBinaryNotAnalog() {
+        var gate = GazeGate()
+        gate.apply(reading(SIMD3(0, 0, 1)))                          // baseline, open
+        // An angle inside the hysteresis band (between open and close) holds the previous state (open),
+        // never a partial value — so a slow eye-roll can't ride the cover partway.
+        gate.apply(reading(SIMD3(sin(0.28), 0, cos(0.28))))        // ~16°, between 0.20 and 0.38
+        #expect(gate.away == 0)
     }
 
     @Test func blinkHoldsState() {
         var gate = GazeGate()
         gate.apply(reading(SIMD3(0, 0, 1)))
-        gate.apply(reading(SIMD3(sin(0.5), 0, cos(0.5))))           // away ~1
+        gate.apply(reading(SIMD3(sin(0.5), 0, cos(0.5))))           // away == 1
         let before = gate.away
         gate.apply(reading(SIMD3(0, 0, 1), blinking: true))        // blink → ignored
         #expect(gate.away == before)
+    }
+
+    @Test func lowLightSuspendsGaze() {
+        var gate = GazeGate()
+        gate.apply(reading(SIMD3(0, 0, 1)))                          // good light, baseline
+        gate.apply(reading(SIMD3(sin(0.5), 0, cos(0.5)), lux: 100)) // dark + looking away
+        #expect(gate.away == 0)                                     // suspended → pose-only, not closed
     }
 
     @Test func lostTrackingReadsAsAway() {

@@ -29,6 +29,8 @@ final class PrivacyLensModel {
     private(set) var gazeAway: Float = 0
     /// Signed horizontal look-away direction (drives the sweep when gaze is the closer).
     private(set) var gazeDirection: Float = 0
+    /// ARKit ambient light estimate (lux, -1 when unknown). Surfaced via the modifier for the host.
+    private(set) var ambientLux: Double = -1
     /// Random offset for the perforated mask, regenerated each appearance (static while shown).
     private(set) var maskSeed = SIMD2<Float>(0, 0)
 
@@ -71,8 +73,11 @@ final class PrivacyLensModel {
     }
 
     /// Begin gaze tracking (opt-in). Starts the front-camera session (prompts for camera permission
-    /// the first time); while it runs, ARKit also supplies the device pose.
-    func startGaze() {
+    /// the first time); while it runs, ARKit also supplies the device pose. `minLux`/`resumeLux`
+    /// configure the low-light suspension band.
+    func startGaze(minLux: Double, resumeLux: Double) {
+        gazeGate.minLux = minLux
+        gazeGate.resumeLux = resumeLux
         gazeGate.recenter()
         guard gazeToken == nil else { return }
         gazeToken = gazeSource.addListener { [weak self] reading in
@@ -89,12 +94,9 @@ final class PrivacyLensModel {
                 if !self.usingARPose { self.usingARPose = true; self.poseGate.reset() }
                 self.poseGate.apply(roll: reading.roll, pitch: reading.pitch, now: CACurrentMediaTime())
                 self.publishPose()
-                if reading.gazeReliable {
-                    self.gazeGate.apply(reading)
-                } else {
-                    // Too dark to trust gaze → suspend it and gate on pose only (don't force closed).
-                    self.gazeGate.reset()
-                }
+                // The gate handles look-away (binary slam) and low-light suspension internally.
+                self.gazeGate.apply(reading)
+                self.ambientLux = reading.ambientLux
                 self.publishGaze()
             }
         }
@@ -147,7 +149,10 @@ public struct PrivacyBlindsModifier: ViewModifier {
     var closeThresholdDeg: Float = 16
     var maxViewAngleDeg: Float = 20
     var eyeTracking: Bool = false   // opt-in: also close when the user looks away (front camera)
+    var eyeTrackingMinLux: Double = Tuning.ambientLuxLow      // suspend gaze below this ambient light
+    var eyeTrackingResumeLux: Double = Tuning.ambientLuxHigh  // resume gaze above this ambient light
     var onStateChange: ((Bool) -> Void)?
+    var onAmbientLux: ((Double) -> Void)?   // reports the ARKit ambient light estimate (lux)
 
     @State private var model = PrivacyLensModel()
     @State private var touchLocation: CGPoint?
@@ -253,11 +258,14 @@ public struct PrivacyBlindsModifier: ViewModifier {
             }
             .onAppear {
                 model.start()
-                if eyeTracking { model.startGaze() }
+                if eyeTracking { model.startGaze(minLux: eyeTrackingMinLux, resumeLux: eyeTrackingResumeLux) }
             }
             .onDisappear { model.stop() }
-            .onChange(of: eyeTracking) { _, on in on ? model.startGaze() : model.stopGaze() }
+            .onChange(of: eyeTracking) { _, on in
+                on ? model.startGaze(minLux: eyeTrackingMinLux, resumeLux: eyeTrackingResumeLux) : model.stopGaze()
+            }
             .onChange(of: closed) { _, newValue in onStateChange?(newValue) }
+            .onChange(of: model.ambientLux) { _, lux in onAmbientLux?(lux) }
     }
 
     private func coverLayer(size: CGSize, closeProgress: Float, viewAngle: Float,
