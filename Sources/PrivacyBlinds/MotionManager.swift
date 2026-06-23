@@ -28,13 +28,20 @@ struct MotionReading: Sendable {
     var rollVelocity: Float
 }
 
+/// Abstraction over the device-pose stream so the lens model can be driven (and tested) without
+/// CoreMotion. `MotionManager` is the production implementation.
+protocol PoseSource: AnyObject {
+    @discardableResult func addListener(_ listener: @escaping (MotionReading) -> Void) -> UUID
+    func removeListener(_ id: UUID)
+}
+
 /// One shared CoreMotion stream that every `privacyBlinds` overlay reads from.
 ///
 /// `@unchecked Sendable`: the gyro/gravity integration state is only ever touched on the internal
 /// motion queue; the `listeners` map is only touched on the main actor (subscribe/unsubscribe and
 /// the main-thread fan-out). `gravityCorrectionGain` is a single `Float` tuning knob written from
 /// main and read on the motion queue — a benign data race for a smoothing coefficient.
-final class MotionManager: @unchecked Sendable {
+final class MotionManager: PoseSource, @unchecked Sendable {
 
     static let shared = MotionManager()
 

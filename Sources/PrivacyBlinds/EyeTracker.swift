@@ -36,10 +36,17 @@ struct GazeReading: Sendable {
                                          roll: 0, pitch: 0, isBlinking: false)
 }
 
+/// Abstraction over the gaze stream so the lens model can be driven (and tested) without ARKit.
+/// `EyeTracker` is the production implementation.
+protocol GazeSource: AnyObject {
+    @discardableResult func addListener(_ listener: @escaping (GazeReading) -> Void) -> UUID
+    func removeListener(_ id: UUID)
+}
+
 /// Shared front-camera gaze stream. `@unchecked Sendable`: `listeners` and the session are only
 /// touched on the main thread (the ARSession delegate queue is set to `.main`), and subscribe/
 /// unsubscribe happen from the main actor.
-final class EyeTracker: NSObject, ARSessionDelegate, @unchecked Sendable {
+final class EyeTracker: NSObject, ARSessionDelegate, GazeSource, @unchecked Sendable {
 
     static let shared = EyeTracker()
 

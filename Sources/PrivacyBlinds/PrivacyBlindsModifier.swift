@@ -10,12 +10,14 @@
 import SwiftUI
 import UIKit
 import simd
+import QuartzCore
 
-// MARK: - Motion model
+// MARK: - Lens model
 
-/// Subscribes to the shared motion stream, captures the reading pose on first reading (and on
-/// `recenter()`), and publishes the signed roll deviation from that pose. Held by the modifier as
-/// `@State` so its lifetime tracks the view.
+/// Orchestrates the pose + gaze streams and publishes the values the overlay renders from. The actual
+/// gating logic lives in the pure, unit-tested `PoseGate` / `GazeGate`; this type only wires the
+/// device sources to them and mirrors their outputs into observable state. Sources are injected
+/// (defaulting to the shared singletons) so the model can be driven with fakes in tests.
 @MainActor
 @Observable
 final class PrivacyLensModel {
@@ -23,164 +25,98 @@ final class PrivacyLensModel {
     private(set) var rollDeviation: Float = 0
     /// Signed pitch deviation (top-to-bottom) from the reading pose, in radians.
     private(set) var pitchDeviation: Float = 0
-    /// Random offset for the perforated mask, regenerated each time the view appears so the hole
-    /// pattern differs every time (but stays static while shown — see the shader note on why).
-    private(set) var maskSeed = SIMD2<Float>(0, 0)
-
-    /// 0 = looking at the screen .. 1 = looking away (a close amount from gaze). Only meaningful when
-    /// eye tracking is on; 0 otherwise.
+    /// 0 = looking at the screen .. 1 = looking away (only meaningful with eye tracking on).
     private(set) var gazeAway: Float = 0
     /// Signed horizontal look-away direction (drives the sweep when gaze is the closer).
     private(set) var gazeDirection: Float = 0
+    /// Random offset for the perforated mask, regenerated each appearance (static while shown).
+    private(set) var maskSeed = SIMD2<Float>(0, 0)
 
-    private var referenceRoll: Float?
-    private var referencePitch: Float?
-    private var needsCapture = true
+    private let poseSource: PoseSource
+    private let gazeSource: GazeSource
+    private var poseGate = PoseGate()
+    private var gazeGate = GazeGate()
+
     private var token: UUID?
     private var gazeToken: UUID?
-    private var referenceGaze: SIMD3<Float>?
-    private var needsGazeCapture = true
-
-    // Gaze thresholds: angle (radians) the combined head+eye gaze has turned from the captured
-    // "looking at the screen" baseline. Tuned on device.
-    // Set just beyond the screen's own angular extent (~10–13° from center at reading distance) so
-    // looking at the screen's edges doesn't start closing — only looking past the screen does.
-    private let gazeOpenAngle: Float = 0.20   // ~11° — within this → still on the screen
-    private let gazeCloseAngle: Float = 0.38  // ~22° — beyond this → looking away (fully closed)
-
-    // Settle detection: when a (re)capture is pending we wait until the device is held still before
-    // anchoring the reading pose — so a re-center lands on where you actually read, not mid-motion.
-    private var lastRoll: Float?
-    private var lastPitch: Float?
-    private var stillFrames = 0
-    private var pendingFrames = 0
-    private let stillDeltaThreshold: Float = 0.02   // rad/frame (roll+pitch); below this ≈ "held still"
-    private let settleFrames = 15                   // ~0.25s of stillness before we anchor
-    private let maxPendingFrames = 150              // ~2.5s safety valve so you can't get stuck closed
-
-    // While the AR (eye-tracking) session runs it suspends CMMotionManager, so pose comes from ARKit.
+    /// While the AR (eye-tracking) session runs it suspends CMMotionManager, so pose comes from ARKit.
     private var usingARPose = false
 
+    init(pose: PoseSource = MotionManager.shared, gaze: GazeSource = EyeTracker.shared) {
+        self.poseSource = pose
+        self.gazeSource = gaze
+    }
+
     func start() {
-        resetAnchor()
-        // Fresh mask pattern each appearance.
-        maskSeed = SIMD2<Float>(.random(in: 0..<4096), .random(in: 0..<4096))
+        poseGate.reset()
+        maskSeed = SIMD2<Float>(.random(in: 0..<Tuning.maskSeedRange),
+                                .random(in: 0..<Tuning.maskSeedRange))
         guard token == nil else { return }
-        token = MotionManager.shared.addListener { [weak self] reading in
-            // MotionManager always fans out on the main thread (it dispatches to main / the
-            // simulation timer fires on main), so it is safe to assume main-actor isolation here
-            // and update synchronously — no async hop, no motion lag.
+        token = poseSource.addListener { [weak self] reading in
+            // The sources always fan out on the main thread, so assume main-actor isolation and
+            // update synchronously — no async hop, no motion lag.
             MainActor.assumeIsolated {
-                guard let self else { return }
-                guard !self.usingARPose else { return }   // ARKit is driving pose while it runs
-                self.applyPose(roll: reading.roll, pitch: reading.pitch)
+                guard let self, !self.usingARPose else { return }   // ARKit drives pose while it runs
+                self.poseGate.apply(roll: reading.roll, pitch: reading.pitch, now: CACurrentMediaTime())
+                self.publishPose()
             }
         }
     }
 
-    /// Settle detection + deviation, shared by the MotionManager and ARKit pose sources.
-    private func applyPose(roll: Float, pitch: Float) {
-        // Track how still the device is, frame to frame, across both axes.
-        if let lr = lastRoll, let lp = lastPitch {
-            let moved = abs(wrapToPi(roll - lr)) + abs(wrapToPi(pitch - lp))
-            stillFrames = moved < stillDeltaThreshold ? stillFrames + 1 : 0
-        }
-        lastRoll = roll
-        lastPitch = pitch
-
-        if needsCapture {
-            // Anchor once the user has settled (held still) — or force it after the safety timeout so a
-            // fidgety hold can't leave the cover stuck closed. Until then we keep measuring against the
-            // previous anchor (so the cover stays closed mid-reposition).
-            pendingFrames += 1
-            if stillFrames >= settleFrames || pendingFrames >= maxPendingFrames {
-                referenceRoll = roll
-                referencePitch = pitch
-                needsCapture = false
-                pendingFrames = 0
-            }
-        }
-
-        guard let refRoll = referenceRoll, let refPitch = referencePitch else { return }
-        rollDeviation = wrapToPi(roll - refRoll)
-        pitchDeviation = wrapToPi(pitch - refPitch)
-    }
-
-    /// Force a fresh settle + anchor (e.g. when the pose source switches between CoreMotion and ARKit,
-    /// whose absolute roll/pitch differ).
-    private func resetAnchor() {
-        needsCapture = true
-        pendingFrames = 0
-        stillFrames = 0
-        lastRoll = nil
-        lastPitch = nil
-    }
-
-    /// Re-capture the reading pose once the device next settles (held still). Triggered deliberately
-    /// (two-finger triple-tap) — never automatically from motion, so incidental movement can't reveal
-    /// the content.
+    /// Re-anchor the reading pose (and re-baseline gaze) on the next settle. Triggered deliberately
+    /// (two-finger triple-tap) — never automatically from motion, so incidental movement can't reveal.
     func recenter() {
-        resetAnchor()
-        needsGazeCapture = true   // re-baseline the "looking at the screen" gaze too
+        poseGate.reset()
+        gazeGate.recenter()
     }
 
-    /// Begin gaze tracking (opt-in). Starts the shared front-camera session, which prompts for camera
-    /// permission the first time. While it runs, ARKit also supplies the device pose (it suspends
-    /// CMMotionManager).
+    /// Begin gaze tracking (opt-in). Starts the front-camera session (prompts for camera permission
+    /// the first time); while it runs, ARKit also supplies the device pose.
     func startGaze() {
-        needsGazeCapture = true
+        gazeGate.recenter()
         guard gazeToken == nil else { return }
-        gazeToken = EyeTracker.shared.addListener { [weak self] reading in
+        gazeToken = gazeSource.addListener { [weak self] reading in
             MainActor.assumeIsolated {
                 guard let self else { return }
-
                 if reading.unavailable {
                     // No TrueDepth / permission denied → AR drives nothing; stay on CoreMotion pose.
-                    if self.usingARPose { self.usingARPose = false; self.resetAnchor() }
-                    self.gazeAway = 0
-                    self.gazeDirection = 0
+                    if self.usingARPose { self.usingARPose = false; self.poseGate.reset() }
+                    self.gazeGate.reset()
+                    self.publishGaze()
                     return
                 }
-
                 // AR session is delivering frames → it drives pose (CMMotionManager is suspended).
-                if !self.usingARPose { self.usingARPose = true; self.resetAnchor() }
-                self.applyPose(roll: reading.roll, pitch: reading.pitch)
-
-                // --- Gaze ---
-                if !reading.isTracked {
-                    self.gazeAway = 1   // face not in view (e.g. turned fully away) → looking away
-                    return
-                }
-                // Mid-blink the gaze estimate spikes — hold the last state so a blink doesn't flash closed.
-                if reading.isBlinking { return }
-                // Capture the current gaze as "looking at the screen" on the first frame after start /
-                // re-center (the user is looking at the screen then).
-                if self.needsGazeCapture {
-                    self.referenceGaze = reading.gazeDir
-                    self.needsGazeCapture = false
-                }
-                guard let ref = self.referenceGaze else { return }
-                // Angle the combined head+eye gaze has turned from that baseline.
-                let cosA = max(-1, min(1, simd_dot(reading.gazeDir, ref)))
-                self.gazeAway = smoothstep(self.gazeOpenAngle, self.gazeCloseAngle, acos(cosA))
-                self.gazeDirection = reading.gazeDir.x - ref.x   // signed horizontal hint for the sweep
+                if !self.usingARPose { self.usingARPose = true; self.poseGate.reset() }
+                self.poseGate.apply(roll: reading.roll, pitch: reading.pitch, now: CACurrentMediaTime())
+                self.publishPose()
+                self.gazeGate.apply(reading)
+                self.publishGaze()
             }
         }
     }
 
     func stopGaze() {
-        if let gazeToken { EyeTracker.shared.removeListener(gazeToken) }
+        if let gazeToken { gazeSource.removeListener(gazeToken) }
         gazeToken = nil
-        gazeAway = 0
-        gazeDirection = 0
-        referenceGaze = nil
-        if usingARPose { usingARPose = false; resetAnchor() }   // CoreMotion resumes → re-anchor
+        gazeGate.reset()
+        publishGaze()
+        if usingARPose { usingARPose = false; poseGate.reset() }   // CoreMotion resumes → re-anchor
     }
 
     func stop() {
-        if let token { MotionManager.shared.removeListener(token) }
+        if let token { poseSource.removeListener(token) }
         token = nil
         stopGaze()
+    }
+
+    private func publishPose() {
+        rollDeviation = poseGate.rollDeviation
+        pitchDeviation = poseGate.pitchDeviation
+    }
+
+    private func publishGaze() {
+        gazeAway = gazeGate.away
+        gazeDirection = gazeGate.direction
     }
 }
 
@@ -211,15 +147,17 @@ public struct PrivacyBlindsModifier: ViewModifier {
     @State private var model = PrivacyLensModel()
     @State private var touchLocation: CGPoint?
     @State private var revealProgress: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The tileable blue-noise dither array shipped with the package, loaded once.
     private static let blueNoise: Image = {
-        if let url = Bundle.module.url(forResource: "blueNoise", withExtension: "png"),
-           let data = try? Data(contentsOf: url),
-           let ui = UIImage(data: data) {
-            return Image(uiImage: ui)
+        guard let url = Bundle.module.url(forResource: "blueNoise", withExtension: "png"),
+              let data = try? Data(contentsOf: url),
+              let ui = UIImage(data: data) else {
+            assertionFailure("PrivacyBlinds: blueNoise.png is missing from the package resource bundle")
+            return Image(systemName: "circle.fill")
         }
-        return Image(systemName: "circle.fill") // fallback; should never hit
+        return Image(uiImage: ui)
     }()
 
     /// 1×1 clear image passed as the mask-image slot when the mask isn't using an image (the shader
@@ -271,7 +209,7 @@ public struct PrivacyBlindsModifier: ViewModifier {
         // Reading closeProgress here establishes the state/observation dependencies for re-render.
         let progress = closeProgress
         let angle = viewAngle
-        let closed = enabled && progress > 0.5
+        let closed = enabled && progress > Tuning.closedThreshold
         let maskActive = enabled && maskFillRatio > 0
         let touch = touchLocation
 
@@ -291,10 +229,10 @@ public struct PrivacyBlindsModifier: ViewModifier {
                                         if let location {
                                             touchLocation = location
                                             if revealProgress != 1 {
-                                                withAnimation(.easeOut(duration: 0.10)) { revealProgress = 1 }
+                                                setRevealProgress(1, .easeOut(duration: Tuning.revealOpenDuration))
                                             }
                                         } else if revealProgress != 0 {
-                                            withAnimation(.easeIn(duration: 0.10)) { revealProgress = 0 }
+                                            setRevealProgress(0, .easeIn(duration: Tuning.revealCloseDuration))
                                         }
                                     }
                                 }
@@ -366,6 +304,16 @@ public struct PrivacyBlindsModifier: ViewModifier {
             image.resizable().scaledToFill()
         }
     }
+
+    /// Animate the reading band open/closed — unless Reduce Motion is on, in which case snap instantly.
+    /// (The pose/gaze gating itself isn't decorative motion, so it's unaffected; only this flourish is.)
+    private func setRevealProgress(_ value: CGFloat, _ animation: Animation) {
+        if reduceMotion {
+            revealProgress = value
+        } else {
+            withAnimation(animation) { revealProgress = value }
+        }
+    }
 }
 
 // MARK: - Animatable shader wrapper
@@ -428,12 +376,48 @@ private struct PrivacyBlindsShaderModifier: ViewModifier, Animatable {
     }
 }
 
-// MARK: - Passthrough touch observer
+// MARK: - Window gesture bridges
 
-/// Reports the touch location (or nil on lift) without consuming touches — the content underneath
-/// keeps scrolling/tapping. The recognizer is attached at the window so it fires on touch-down
-/// immediately, sidestepping a ScrollView's `delaysContentTouches` latency. Coordinates are in the
-/// observing view's space, which the GeometryReader aligns with the shader's `position`.
+/// Base for a transparent view that observes touches via a recognizer attached to the *window* — so
+/// it fires on touch-down without a ScrollView's `delaysContentTouches` latency and never consumes
+/// touches (the content keeps scrolling/tapping). Subclasses supply the recognizer in `makeRecognizer`.
+private class WindowGestureView: UIView, UIGestureRecognizerDelegate {
+    private weak var attachedTo: UIView?
+    private var recognizer: UIGestureRecognizer?
+
+    /// Subclasses build their recognizer here (target/action and any config).
+    func makeRecognizer() -> UIGestureRecognizer { UIGestureRecognizer() }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if recognizer == nil {
+            let g = makeRecognizer()
+            g.cancelsTouchesInView = false   // don't steal touches from the content
+            g.delegate = self
+            recognizer = g
+        }
+        detach()
+        if let window, let recognizer {
+            window.addGestureRecognizer(recognizer)
+            attachedTo = window
+        }
+    }
+
+    /// Remove our recognizer from the window (called on teardown so they don't accumulate).
+    func detach() {
+        if let recognizer { attachedTo?.removeGestureRecognizer(recognizer) }
+        attachedTo = nil
+    }
+
+    // Never the hit-test target → touches always pass through to the content below.
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
+
+/// Reports the touch location (or nil on lift) for the mask reading band, in the view's own space
+/// (which the GeometryReader aligns with the shader's `position`).
 private struct TouchObserver: UIViewRepresentable {
     var onChange: (CGPoint?) -> Void
 
@@ -442,33 +426,18 @@ private struct TouchObserver: UIViewRepresentable {
         view.onChange = onChange
         return view
     }
-
-    func updateUIView(_ uiView: TouchObservingView, context: Context) {
-        uiView.onChange = onChange
-    }
+    func updateUIView(_ uiView: TouchObservingView, context: Context) { uiView.onChange = onChange }
+    static func dismantleUIView(_ uiView: TouchObservingView, coordinator: ()) { uiView.detach() }
 }
 
-private final class TouchObservingView: UIView, UIGestureRecognizerDelegate {
+private final class TouchObservingView: WindowGestureView {
     var onChange: ((CGPoint?) -> Void)?
-    private weak var attachedTo: UIView?
 
-    private lazy var press: UILongPressGestureRecognizer = {
+    override func makeRecognizer() -> UIGestureRecognizer {
         let g = UILongPressGestureRecognizer(target: self, action: #selector(handle(_:)))
-        g.minimumPressDuration = 0          // fire on touch-down, no delay
-        g.cancelsTouchesInView = false      // don't steal touches from the scroll view
+        g.minimumPressDuration = 0       // fire on touch-down, no delay
         g.delaysTouchesBegan = false
-        g.delegate = self
         return g
-    }()
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        attachedTo?.removeGestureRecognizer(press)
-        attachedTo = nil
-        if let window {
-            window.addGestureRecognizer(press)
-            attachedTo = window
-        }
     }
 
     @objc private func handle(_ g: UILongPressGestureRecognizer) {
@@ -480,19 +449,10 @@ private final class TouchObservingView: UIView, UIGestureRecognizerDelegate {
             onChange?(nil)
         }
     }
-
-    // Never the hit-test target → touches always pass through to the content below.
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
-
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }
 
-// MARK: - Re-center gesture (two-finger triple-tap)
-
 /// Fires `onRecenter` on a two-finger triple-tap — a deliberate, uncommon gesture that won't collide
-/// with normal taps/scrolls. Attached at the window and non-consuming, so it works anywhere over the
-/// protected view without interfering with the content.
+/// with normal taps/scrolls.
 private struct RecenterGesture: UIViewRepresentable {
     var onRecenter: () -> Void
 
@@ -501,56 +461,19 @@ private struct RecenterGesture: UIViewRepresentable {
         view.onRecenter = onRecenter
         return view
     }
-
-    func updateUIView(_ uiView: RecenterView, context: Context) {
-        uiView.onRecenter = onRecenter
-    }
+    func updateUIView(_ uiView: RecenterView, context: Context) { uiView.onRecenter = onRecenter }
+    static func dismantleUIView(_ uiView: RecenterView, coordinator: ()) { uiView.detach() }
 }
 
-private final class RecenterView: UIView, UIGestureRecognizerDelegate {
+private final class RecenterView: WindowGestureView {
     var onRecenter: (() -> Void)?
-    private weak var attachedTo: UIView?
 
-    private lazy var tap: UITapGestureRecognizer = {
+    override func makeRecognizer() -> UIGestureRecognizer {
         let g = UITapGestureRecognizer(target: self, action: #selector(fire))
         g.numberOfTouchesRequired = 2
         g.numberOfTapsRequired = 3
-        g.cancelsTouchesInView = false
-        g.delegate = self
         return g
-    }()
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        attachedTo?.removeGestureRecognizer(tap)
-        attachedTo = nil
-        if let window {
-            window.addGestureRecognizer(tap)
-            attachedTo = window
-        }
     }
 
     @objc private func fire() { onRecenter?() }
-
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
-
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
-}
-
-// MARK: - Math helpers
-
-@inline(__always)
-func smoothstep(_ edge0: Float, _ edge1: Float, _ x: Float) -> Float {
-    let denom = max(edge1 - edge0, .leastNonzeroMagnitude)
-    let t = max(0, min(1, (x - edge0) / denom))
-    return t * t * (3 - 2 * t)
-}
-
-@inline(__always)
-func wrapToPi(_ angle: Float) -> Float {
-    var x = angle
-    while x > .pi { x -= 2 * .pi }
-    while x < -.pi { x += 2 * .pi }
-    return x
 }
