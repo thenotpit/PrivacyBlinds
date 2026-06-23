@@ -19,8 +19,18 @@ what's beneath. So it works over *any* view (a `ScrollView`, an image, a whole s
 content capture, and the protected pixels are never handed to the shader.
 
 Device pose comes from a single shared `CoreMotion` stream (gyro integration + a gravity
-complementary filter for drift-free roll). When the modifier appears it captures the current pose
-as the reading pose; deviation from it drives how closed the lens is.
+complementary filter for drift-free roll, plus a gravity-derived pitch). When the modifier appears
+it captures the current pose as the reading pose; deviation from it drives how closed the lens is.
+
+**Multi-axis:** both side-to-side roll and top-to-bottom pitch are combined into one deviation
+magnitude, so tilting the device *any* direction (or a mix) past the threshold closes the cover. The
+closing sweep also follows the tilt direction it came from.
+
+**Re-centering:** the reading pose is captured on appear, once the device settles (held still), so
+the "open" pose lands where you actually read rather than mid-motion. To reset it deliberately — say
+you shift to a new reading position — **two-finger triple-tap** the protected view to re-anchor. The
+pose is *never* re-anchored automatically from motion, so incidental movement (dropping your hand,
+setting the phone down) can't reveal the content.
 
 ## ⚠️ Pose-gated, not anti-shoulder-surfer privacy
 
@@ -40,7 +50,7 @@ as a "reveal only when held just-so" gate / glance-deterrent, not a guarantee ag
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/<your-account>/PrivacyBlinds.git", from: "0.1.0")
+.package(url: "https://github.com/thenotpit/PrivacyBlinds.git", from: "0.2.0")
 ```
 
 …then add `"PrivacyBlinds"` to your target's dependencies. Or in Xcode: **File ▸ Add Package
@@ -67,6 +77,33 @@ React to open/close:
 }
 ```
 
+### Privacy mask (perforated overlay)
+
+Optionally, while the lens is open at the reading position, lay down a **perforated blue-noise
+mask** over the content — an evenly-distributed field of opaque cells with transparent holes:
+
+```swift
+SecretView().privacyBlinds(
+    cover: .black,
+    maskFillRatio: 0.4,            // 0 = off; fraction of cells opaque (more = denser)
+    maskCellSize: 3,              // hole spacing in points (smaller = finer grain)
+    maskCover: .color(.white)     // the mask's own color/image, independent of the blinds cover
+)
+```
+
+You can read through the holes up close, but the cells integrate toward solid at a distance / to a
+camera, so it raises the bar on casual off-angle photos. The pattern is **blue noise** (even, no
+clumps, no moiré) and is regenerated **per appearance** but held **static while shown** — animating
+it would let a camera average frames and recover the content.
+
+**Touch reading band:** while the mask is on, press the view and a horizontal band clears the mask
+at your finger so you can read a line straight through it; it emanates from the touch point and
+follows your finger, and doesn't block scrolling. Size it with `maskRevealHeight` / `maskRevealFeather`.
+
+> Honest caveat: the "dense at a distance" effect is optical and depends on pixel density, hole
+> size, viewing distance, and the camera — validate it with a real camera before relying on it. It
+> reduces capture fidelity; it is not a guarantee.
+
 ### Tuning
 
 | Parameter | Default | What it does |
@@ -77,15 +114,24 @@ React to open/close:
 | `sweep` | `1.0` | 0 = uniform per-strip fade, 1 = full swipe-over fill |
 | `transition` | `0.75` | Sweep edge softness |
 | `directionalSweep` | `0.5` | How strongly the close cascades in the tilt direction (0 = lockstep) |
-| `openThresholdDegrees` | `8` | At/below this much deviation the lens is fully open |
-| `closeThresholdDegrees` | `16` | At/above this much deviation the lens is fully closed |
+| `openThresholdDegrees` | `8` | At/below this much combined (roll+pitch) deviation the lens is fully open |
+| `closeThresholdDegrees` | `16` | At/above this much combined (roll+pitch) deviation the lens is fully closed |
 | `maxViewAngleDegrees` | `20` | Clamp for the sweep-direction angle |
+| `maskFillRatio` | `0` | Privacy-mask density (0 = off; fraction of cells opaque) |
+| `maskCellSize` | `3` | Mask hole spacing in points (smaller = finer grain) |
+| `maskRevealHeight` | `70` | Height of the touch-following reading band, points |
+| `maskRevealFeather` | `18` | Soft edge of the reading band, points |
+| `maskCover` | `.black` | Mask pattern appearance, independent of the blinds `cover` |
+
+Re-center the reading pose with a **two-finger triple-tap** on the protected view.
 
 ## Status
 
-v0: reveal/cover sweep, roll-based pose gating, and black / color / image covers. Not yet:
-custom-cover persistence, multi-axis (pitch / face-down) deviation, app-switcher snapshot cover,
-Reduce Motion / always-reveal accessibility override, and a live-tuning sheet.
+Reveal/cover sweep with black / color / image covers; multi-axis (roll + pitch) pose gating with
+settle-on-stillness anchoring and a two-finger triple-tap re-center; and an optional perforated
+blue-noise privacy mask with a touch-following reading band. Not yet: custom-cover persistence,
+face-down deviation term, app-switcher snapshot cover, Reduce Motion / always-reveal accessibility
+override, declared-orientation landscape sweep mapping, and a live-tuning sheet.
 
 ## License
 
