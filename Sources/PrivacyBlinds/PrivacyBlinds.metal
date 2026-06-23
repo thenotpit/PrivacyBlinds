@@ -2,12 +2,10 @@
 //  PrivacyBlinds.metal
 //  PrivacyBlinds
 //
-//  A fork of Lenticular Panel's `fragment_lenticular`. We keep the lens-strip geometry and the
-//  per-lenticule "sweep" reveal, but drop the interlaced-slice sampling, refraction, chromatic
-//  aberration and lighting — and swap the sim's "image A vs image B" blend for a "reveal vs
-//  cover" blend driven by `closeProgress`.
+//  Renders the privacy overlay: vertical strips that sweep closed over the cover, driven by
+//  `closeProgress`. Outputs alpha 0 where a strip reveals the content beneath.
 //
-//  Two deliberate choices vs. the sim:
+//  Two deliberate choices:
 //    • The cover is sampled 1:1 (no per-strip slice, no translation) so an image cover stays crisp
 //      AND always fully covers — translating the sample runs off the cover edge on the leading
 //      side and opens a see-through privacy gap, so we don't.
@@ -29,9 +27,9 @@ half4 privacyBlinds(
     float2 position,                // implicit: pixel position (points) in the layer
     SwiftUI::Layer cover,           // implicit: sampleable cover overlay (NOT the content beneath)
     float2 size,                    // view size in points
-    float  lenticuleWidth,          // strip width in points
+    float  stripWidth,              // strip width in points
     float  closeProgress,           // 0 = fully open/revealed .. 1 = fully closed/covered
-    float  lenticuleSweep,          // 0 = uniform per-strip fade .. 1 = full swipe-over fill
+    float  stripSweep,              // 0 = uniform per-strip fade .. 1 = full swipe-over fill
     float  transition,              // sweep edge softness
     float  viewAngle,               // signed radians: drives the sweep direction
     float  directionalSweep,        // 0 = strips close in lockstep .. higher = stronger directional cascade
@@ -47,9 +45,9 @@ half4 privacyBlinds(
     half4  maskColor,               // mask pattern color (independent of the blinds cover)
     texture2d<float> maskImage      // mask pattern image (used when maskUseImage > 0.5)
 ) {
-    // --- Lenticule geometry: which vertical strip we're in, and where within it --------------
+    // --- Strip geometry: which vertical strip we're in, and where within it -------------------
     float u   = position.x / size.x;          // 0..1 across the view width
-    float lw  = lenticuleWidth / size.x;      // normalized strip width
+    float lw  = stripWidth / size.x;          // normalized strip width
     float pil = fmod(u, lw) / lw;             // 0..1 within the strip
     float c   = pil - 0.5;                    // -0.5..+0.5 centered
 
@@ -64,13 +62,13 @@ half4 privacyBlinds(
     float screenLead = (u - 0.5) * dirSign * directionalSweep * cascade;
     float localProgress = clamp(closeProgress + screenLead, 0.0, 1.0);
 
-    // --- Per-lenticule sweep: a moving boundary wipes the cover in from one edge of the strip --
+    // --- Per-strip sweep: a moving boundary wipes the cover in from one edge of the strip -------
     // The wipe fills from the side you tilt toward (cc = c * dirSign).
     float edgeSoftness = max(transition * 0.5, 0.02);
     float boundary     = (0.5 + edgeSoftness) - localProgress * (1.0 + 2.0 * edgeSoftness);
     float cc           = c * dirSign;
     float sweepBlend   = smoothstep(boundary - edgeSoftness, boundary + edgeSoftness, cc);
-    float coverAmount  = mix(localProgress, sweepBlend, lenticuleSweep); // 0 reveal .. 1 cover
+    float coverAmount  = mix(localProgress, sweepBlend, stripSweep); // 0 reveal .. 1 cover
 
     // --- Perforated privacy mask (optional) --------------------------------------------------
     // Even at the reading position, lay down opaque black with an evenly-spaced field of holes:

@@ -2,13 +2,10 @@
 //  MotionManager.swift
 //  PrivacyBlinds
 //
-//  Ported from Lenticular Panel as-is. Produces a drift-free roll about the device long axis (Y):
-//  gyro quaternion integration (unbounded `accumulatedAngle`) corrected in real time by a
-//  gravity complementary filter, so body turns and gyro drift don't shift the zero. The privacy
-//  lens reads this stream and computes deviation from a captured reading pose (see PrivacyBlindsModifier).
-//
-//  Only change from the parent: `LenticularSettings.shared.gravityCorrectionGain` is replaced by
-//  the package-local `gravityCorrectionGain` property (tunable from the main actor).
+//  Produces a drift-free roll about the device long axis (Y): gyro quaternion integration (unbounded
+//  `accumulatedAngle`) corrected in real time by a gravity complementary filter, so body turns and
+//  gyro drift don't shift the zero. The privacy overlay reads this stream and computes deviation from
+//  a captured reading pose (see PrivacyBlindsModifier). `gravityCorrectionGain` tunes the correction.
 //
 
 import Foundation
@@ -16,7 +13,7 @@ import CoreMotion
 import simd
 import QuartzCore
 
-/// One frame of device pose the privacy lens reads.
+/// One frame of device pose the privacy overlay reads.
 struct MotionReading: Sendable {
     /// Side-to-side roll about the device long axis (Y), radians. Drift-free: gyro integration
     /// corrected by the gravity complementary filter.
@@ -28,7 +25,7 @@ struct MotionReading: Sendable {
     var rollVelocity: Float
 }
 
-/// Abstraction over the device-pose stream so the lens model can be driven (and tested) without
+/// Abstraction over the device-pose stream so the overlay model can be driven (and tested) without
 /// CoreMotion. `MotionManager` is the production implementation.
 protocol PoseSource: AnyObject {
     @discardableResult func addListener(_ listener: @escaping (MotionReading) -> Void) -> UUID
@@ -50,7 +47,7 @@ final class MotionManager: PoseSource, @unchecked Sendable {
     // Overlays register here to receive pose updates; one stream feeds them all.
     private var listeners: [UUID: (MotionReading) -> Void] = [:]
 
-    // Gravity complementary-filter correction strength per update (was LenticularSettings-driven).
+    // Gravity complementary-filter correction strength per update.
     var gravityCorrectionGain: Float = 0.04
 
     private var lastAngle: Float = 0.0
@@ -211,7 +208,7 @@ final class MotionManager: PoseSource, @unchecked Sendable {
     private func setupSimulatedMotion() {
         simulationStartTime = CACurrentMediaTime()
 
-        // 60 Hz update rate. Oscillates the roll so the lens can be exercised in the simulator.
+        // 60 Hz update rate. Oscillates the roll so the overlay can be exercised in the simulator.
         simulationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
 

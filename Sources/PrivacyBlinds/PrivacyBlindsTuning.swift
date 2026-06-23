@@ -34,7 +34,7 @@ enum Tuning {
     /// horizontal gaze keeps a slight head/eye turn at enable time from biasing the neutral pose.
     static let gazeCaptureHorizontalTol: Float = 0.17   // ~10°
     /// Ambient light (ARKit lux estimate) below which gaze is treated as unreliable and suspended
-    /// (the lens falls back to pose-only). Hysteresis: drop below `low`, recover above `high`.
+    /// (the overlay falls back to pose-only). Hysteresis: drop below `low`, recover above `high`.
     /// Calibrated on device: gaze is flaky ≲200 lux, adequate from ~580 lux up.
     static let ambientLuxLow: Double = 450
     static let ambientLuxHigh: Double = 600

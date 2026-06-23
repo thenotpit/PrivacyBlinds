@@ -2,9 +2,9 @@
 //  EyeTracker.swift
 //  PrivacyBlinds
 //
-//  Optional gaze input for the privacy lens. Runs an ARKit face-tracking session (TrueDepth front
+//  Optional gaze input for the privacy overlay. Runs an ARKit face-tracking session (TrueDepth front
 //  camera) and publishes a coarse gaze estimate — roughly where the user is looking relative to the
-//  device — so the lens can close when they look away. Everything stays on-device; no frames are
+//  device — so the overlay can close when they look away. Everything stays on-device; no frames are
 //  stored or transmitted. Opt-in: only started when a `privacyBlinds(..., eyeTracking: true)` view
 //  is on screen.
 //
@@ -19,11 +19,11 @@ struct GazeReading: Sendable {
     /// in view (treat as "looking away").
     var isTracked: Bool
     /// Whether gaze input is unavailable at all (no TrueDepth camera, or camera permission denied) —
-    /// the lens should fall back to pose-only gating, NOT force itself closed.
+    /// the overlay should fall back to pose-only gating, NOT force itself closed.
     var unavailable: Bool
     /// Unit gaze direction in camera/world space — head orientation AND eye direction combined, so a
-    /// head turn moves it just as an eye movement does. The lens measures its angle against a captured
-    /// "looking at the screen" baseline.
+    /// head turn moves it just as an eye movement does. The overlay measures its angle against a
+    /// captured "looking at the screen" baseline.
     var gazeDir: SIMD3<Float>
     /// Device pose derived from ARKit (gravity-aligned), used while the AR session is running because
     /// it suspends a separate CMMotionManager. Same conventions as `MotionManager` (radians).
@@ -47,7 +47,7 @@ struct GazeReading: Sendable {
                                          horizontalOffset: 0, ambientLux: -1)
 }
 
-/// Abstraction over the gaze stream so the lens model can be driven (and tested) without ARKit.
+/// Abstraction over the gaze stream so the overlay model can be driven (and tested) without ARKit.
 /// `EyeTracker` is the production implementation.
 protocol GazeSource: AnyObject {
     @discardableResult func addListener(_ listener: @escaping (GazeReading) -> Void) -> UUID
@@ -85,7 +85,7 @@ final class EyeTracker: NSObject, ARSessionDelegate, GazeSource, @unchecked Send
 
     private func start() {
         guard EyeTracker.isSupported else {
-            // No TrueDepth camera — report unavailable so the lens falls back to pose-only gating.
+            // No TrueDepth camera — report unavailable so the overlay falls back to pose-only gating.
             notify(.unsupported)
             return
         }

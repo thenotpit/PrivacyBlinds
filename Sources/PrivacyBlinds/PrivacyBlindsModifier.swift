@@ -133,9 +133,9 @@ public struct PrivacyBlindsModifier: ViewModifier {
     let cover: PrivacyCover
     let enabled: Bool
 
-    // Feel knobs (defaults mirror the lenticular sim's LenticularEffectConfig).
+    // Feel knobs.
     var stripWidthPt: CGFloat = 2.0
-    var lenticuleSweep: Float = 1.0
+    var stripSweep: Float = 1.0
     var transition: Float = 0.75
     var directionalSweep: Float = 0.5
     // Perforated privacy mask at the reading position (0 = off).
@@ -288,7 +288,7 @@ public struct PrivacyBlindsModifier: ViewModifier {
                 size: size,
                 stripWidthPt: stripWidthPt,
                 closeProgress: closeProgress,
-                lenticuleSweep: lenticuleSweep,
+                stripSweep: stripSweep,
                 transition: transition,
                 viewAngle: viewAngle,
                 directionalSweep: directionalSweep,
@@ -339,7 +339,7 @@ private struct PrivacyBlindsShaderModifier: ViewModifier, Animatable {
     var size: CGSize
     var stripWidthPt: CGFloat
     var closeProgress: Float
-    var lenticuleSweep: Float
+    var stripSweep: Float
     var transition: Float
     var viewAngle: Float
     var directionalSweep: Float
@@ -366,7 +366,7 @@ private struct PrivacyBlindsShaderModifier: ViewModifier, Animatable {
                 .float2(size),
                 .float(Float(stripWidthPt)),
                 .float(closeProgress),
-                .float(lenticuleSweep),
+                .float(stripSweep),
                 .float(transition),
                 .float(viewAngle),
                 .float(directionalSweep),
