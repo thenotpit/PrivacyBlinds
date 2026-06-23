@@ -35,8 +35,9 @@ enum Tuning {
     static let gazeCaptureHorizontalTol: Float = 0.17   // ~10°
     /// Ambient light (ARKit lux estimate) below which gaze is treated as unreliable and suspended
     /// (the lens falls back to pose-only). Hysteresis: drop below `low`, recover above `high`.
-    static let ambientLuxLow: Double = 10
-    static let ambientLuxHigh: Double = 20
+    /// Calibrated on device: gaze is flaky ≲200 lux, adequate from ~580 lux up.
+    static let ambientLuxLow: Double = 450
+    static let ambientLuxHigh: Double = 600
 
     // MARK: Close-state reporting
     /// `closeProgress` past this is reported as "closed" (drives `onStateChange` + interaction lock).

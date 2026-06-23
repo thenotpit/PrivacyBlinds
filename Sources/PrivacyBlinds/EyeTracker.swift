@@ -128,9 +128,10 @@ final class EyeTracker: NSObject, ARSessionDelegate, GazeSource, @unchecked Send
         // --- Low-light gate (hysteretic) ---
         // Gaze estimation degrades in the dark; below the threshold we suspend gaze and let the lens
         // fall back to pose-only. Pose stays AR-sourced (the session is still running).
-        if let lux = frame.lightEstimate?.ambientIntensity {
-            if lux < Tuning.ambientLuxLow { gazeReliable = false }
-            else if lux > Tuning.ambientLuxHigh { gazeReliable = true }
+        let ambientLux = frame.lightEstimate?.ambientIntensity ?? -1
+        if ambientLux >= 0 {
+            if ambientLux < Tuning.ambientLuxLow { gazeReliable = false }
+            else if ambientLux > Tuning.ambientLuxHigh { gazeReliable = true }
         }
 
         // --- Gaze (when a face is present), expressed in the DEVICE frame ---
@@ -169,7 +170,8 @@ final class EyeTracker: NSObject, ARSessionDelegate, GazeSource, @unchecked Send
                                gazeReliable: gazeReliable))
         } else {
             notify(GazeReading(isTracked: false, unavailable: false, gazeDir: .zero, roll: roll, pitch: pitch,
-                               isBlinking: false, screenAngle: 0, horizontalOffset: 0, gazeReliable: gazeReliable))
+                               isBlinking: false, screenAngle: 0, horizontalOffset: 0,
+                               gazeReliable: gazeReliable))
         }
     }
 
