@@ -25,6 +25,10 @@ enum Tuning {
     static let gazeCloseAngle: Float = 0.38   // ~22°
     /// Average of both eye-blink blendshapes above which we treat the frame as a blink and hold state.
     static let blinkThreshold: Float = 0.5
+    /// Max angle (radians) between the gaze and the direction-to-device for the "looking at screen"
+    /// baseline to be captured. Generous enough to cover the whole screen (incl. the top-camera
+    /// offset), but rejects enabling eye tracking while looking away (which would invert the gate).
+    static let gazeScreenCone: Float = 0.55   // ~31°
 
     // MARK: Close-state reporting
     /// `closeProgress` past this is reported as "closed" (drives `onStateChange` + interaction lock).

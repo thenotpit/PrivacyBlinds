@@ -13,6 +13,7 @@ import simd
 struct GazeGate {
     var openAngle: Float = Tuning.gazeOpenAngle
     var closeAngle: Float = Tuning.gazeCloseAngle
+    var screenCone: Float = Tuning.gazeScreenCone
 
     /// 0 = looking at the screen .. 1 = looking away.
     private(set) var away: Float = 0
@@ -40,6 +41,10 @@ struct GazeGate {
         }
         if reading.isBlinking { return }   // gaze spikes mid-blink — hold the last state
         if needsCapture {
+            // Only anchor the "looking at the screen" baseline if the user really is looking at the
+            // device — otherwise (e.g. eye tracking enabled while looking away) the gate inverts.
+            // Until a valid baseline exists, report away (closed) — privacy-first.
+            guard reading.screenAngle < screenCone else { away = 1; return }
             referenceGaze = reading.gazeDir
             needsCapture = false
         }

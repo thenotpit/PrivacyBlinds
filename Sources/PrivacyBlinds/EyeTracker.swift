@@ -31,9 +31,13 @@ struct GazeReading: Sendable {
     var pitch: Float
     /// Both eyes closed — gaze estimate is unreliable mid-blink, so consumers hold their last state.
     var isBlinking: Bool
+    /// Angle (radians) between the gaze and the direction from the face to the device — ~0 when
+    /// looking straight at the device, growing as the gaze leaves the screen. Used to validate that a
+    /// "looking at screen" baseline is captured only when the user really is looking at the screen.
+    var screenAngle: Float
 
     static let unsupported = GazeReading(isTracked: false, unavailable: true, gazeDir: .zero,
-                                         roll: 0, pitch: 0, isBlinking: false)
+                                         roll: 0, pitch: 0, isBlinking: false, screenAngle: 0)
 }
 
 /// Abstraction over the gaze stream so the lens model can be driven (and tested) without ARKit.
@@ -127,14 +131,21 @@ final class EyeTracker: NSObject, ARSessionDelegate, GazeSource, @unchecked Send
                                        SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
             let gazeDir = simd_normalize(camRot.transpose * gazeWorld)
 
+            // World angle between the gaze and the direction from the face to the device (camera).
+            // ~0 when looking at the device; large when looking away. Rotation-invariant (both rays
+            // rotate together with the body), so it's a reliable "is the user looking at the screen?".
+            let cameraPos = simd_float3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+            let toDevice = simd_normalize(cameraPos - facePos)
+            let screenAngle = acos(max(-1, min(1, simd_dot(gazeWorld, toDevice))))
+
             let bs: (ARFaceAnchor.BlendShapeLocation) -> Float = { face.blendShapes[$0]?.floatValue ?? 0 }
-            let isBlinking = (bs(.eyeBlinkLeft) + bs(.eyeBlinkRight)) * 0.5 > 0.5
+            let isBlinking = (bs(.eyeBlinkLeft) + bs(.eyeBlinkRight)) * 0.5 > Tuning.blinkThreshold
 
             notify(GazeReading(isTracked: true, unavailable: false, gazeDir: gazeDir, roll: roll, pitch: pitch,
-                               isBlinking: isBlinking))
+                               isBlinking: isBlinking, screenAngle: screenAngle))
         } else {
             notify(GazeReading(isTracked: false, unavailable: false, gazeDir: .zero, roll: roll, pitch: pitch,
-                               isBlinking: false))
+                               isBlinking: false, screenAngle: 0))
         }
     }
 

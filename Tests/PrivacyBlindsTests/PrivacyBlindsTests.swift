@@ -81,9 +81,10 @@ import simd
 /// Gaze close amount from the baseline, blink hold, and tracking loss.
 @Suite struct GazeGateTests {
 
-    private func reading(_ dir: SIMD3<Float>, tracked: Bool = true, blinking: Bool = false) -> GazeReading {
+    private func reading(_ dir: SIMD3<Float>, tracked: Bool = true, blinking: Bool = false,
+                         screenAngle: Float = 0.1) -> GazeReading {
         GazeReading(isTracked: tracked, unavailable: false, gazeDir: simd_normalize(dir),
-                    roll: 0, pitch: 0, isBlinking: blinking)
+                    roll: 0, pitch: 0, isBlinking: blinking, screenAngle: screenAngle)
     }
 
     @Test func lookingAtBaselineIsOpen() {
@@ -113,5 +114,15 @@ import simd
         gate.apply(reading(SIMD3(0, 0, 1)))
         gate.apply(reading(SIMD3(0, 0, 1), tracked: false))
         #expect(gate.away == 1)
+    }
+
+    @Test func enablingWhileLookingAwayStaysClosedThenAnchorsOnScreen() {
+        var gate = GazeGate()
+        // Enabled while looking away: large screenAngle → no baseline captured, stays closed.
+        gate.apply(reading(SIMD3(1, 0, 0), screenAngle: 1.2))
+        #expect(gate.away == 1)
+        // Look back at the screen: small screenAngle → baseline captured here → open.
+        gate.apply(reading(SIMD3(0, 0, 1), screenAngle: 0.1))
+        #expect(gate.away == 0)
     }
 }
