@@ -212,6 +212,8 @@ public struct PrivacyBlindsModifier: ViewModifier {
     var openThresholdDeg: Float = 8
     var closeThresholdDeg: Float = 16
     var maxViewAngleDeg: Float = 20
+    // Exclude the protected content from screenshots / screen recordings / mirroring (secure layer).
+    var screenshotProtected: Bool = true
     // Authenticated-gaze mode: Face ID lock/unlock + eye tracking (bundled). Off = pose-only.
     var authenticatedGaze: Bool = false
     var gazeMinLux: Double = Tuning.ambientLuxLow      // suspend gaze below this ambient light
@@ -297,15 +299,21 @@ public struct PrivacyBlindsModifier: ViewModifier {
         let locked = authenticatedGaze && model.lockState != .unlocked
         // Unlocked but tracking not yet online → hold a covering "warming up" scan over the content.
         let warming = authenticatedGaze && model.lockState == .unlocked && !model.gazeReady
-        let closed = enabled && (locked || warming || progress > Tuning.closedThreshold)
+        // App not in the foreground → fully cover so the OS app-switcher snapshot can't leak content
+        // (every mode, not just authenticated). Covers on `.inactive` too, ahead of the snapshot.
+        let backgrounded = scenePhase != .active
+        let closed = enabled && (locked || warming || backgrounded || progress > Tuning.closedThreshold)
         let maskActive = enabled && maskFillRatio > 0
         let touch = touchLocation
 
-        return content
+        return secured(content)
             .overlay {
                 if enabled {
                     GeometryReader { geo in
-                        if locked {
+                        if backgrounded {
+                            coverLayer(size: geo.size, closeProgress: 1, viewAngle: 0,
+                                       revealY: 0, revealProgress: 0)
+                        } else if locked {
                             lockedCover(size: geo.size)
                         } else if warming {
                             warmingCover(size: geo.size)
@@ -353,6 +361,18 @@ public struct PrivacyBlindsModifier: ViewModifier {
                 if phase == .background, model.lockState == .unlocked { model.relock() }
             }
             .onChange(of: model.ambientLux) { _, lux in onAmbientLux?(lux) }
+    }
+
+    /// Route the protected content through the secure layer (excluded from capture) when requested.
+    /// Gated on `enabled` so `enabled: false` (the accessibility always-reveal escape hatch) is a clean
+    /// full passthrough.
+    @ViewBuilder
+    private func secured(_ content: Content) -> some View {
+        if screenshotProtected && enabled {
+            ScreenshotProtectedHost { content }
+        } else {
+            content
+        }
     }
 
     /// Start the right mode for the current `authenticatedGaze` setting.
@@ -500,6 +520,63 @@ public struct PrivacyBlindsModifier: ViewModifier {
             revealProgress = value
         } else {
             withAnimation(animation) { revealProgress = value }
+        }
+    }
+}
+
+// MARK: - Screenshot protection (secure layer)
+
+/// Hosts SwiftUI content inside a secure `UITextField`'s text-layout canvas. iOS renders that canvas
+/// but **excludes it from screenshots, screen recordings, and mirroring** — so the protected content
+/// reads blank in any capture, while staying visible live.
+///
+/// Caveats (inherent to the technique): it relies on UIKit's secure-field rendering (an undocumented
+/// behavior Apple could change), it severs SwiftUI environment inheritance into the hosted content,
+/// and it's sized to fill its frame — best for content that fills (not intrinsic-sized layouts).
+private struct ScreenshotProtectedHost<Content: View>: UIViewRepresentable {
+    @ViewBuilder var content: () -> Content
+
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView()
+        let field = UITextField()
+        field.isSecureTextEntry = true            // makes the text-layout canvas capture-excluded
+        field.isUserInteractionEnabled = true     // needed so touches reach the hosted content
+        field.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(field)
+        NSLayoutConstraint.activate([
+            field.topAnchor.constraint(equalTo: container.topAnchor),
+            field.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            field.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            field.trailingAnchor.constraint(equalTo: container.trailingAnchor)
+        ])
+
+        // The secure canvas is the field's first subview; hosting content inside it makes the content
+        // part of the capture-excluded layer. Fall back to the container if the internal view moves.
+        let canvas = field.subviews.first ?? container
+        let host = context.coordinator.host
+        host.view.backgroundColor = .clear
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        canvas.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.topAnchor.constraint(equalTo: container.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            host.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: container.trailingAnchor)
+        ])
+        return container
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.host.rootView = content()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(rootView: content()) }
+
+    @MainActor final class Coordinator {
+        let host: UIHostingController<Content>
+        init(rootView: Content) {
+            host = UIHostingController(rootView: rootView)
+            host.view.backgroundColor = .clear
         }
     }
 }

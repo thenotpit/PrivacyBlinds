@@ -50,6 +50,10 @@ public extension View {
     ///   - closeThresholdDegrees: total pose deviation (roll + pitch combined) at/above which the
     ///     overlay is fully closed (default `16`). Tilting side-to-side, top-to-bottom, or any mix counts.
     ///   - maxViewAngleDegrees: Clamp for the sweep-direction angle (default `20`).
+    ///   - screenshotProtected: Exclude the protected content from screenshots / screen recordings /
+    ///     mirroring via a secure layer — it reads blank in any capture while staying visible live
+    ///     (default `true`). Routes content through a UIKit secure container; see the docs for caveats
+    ///     (severs SwiftUI environment inheritance into the content; best for fill-sized content).
     ///   - maskFillRatio: Perforated "privacy mask" density at the reading position — the fraction of
     ///     cells painted opaque (0 = off/clear, ~0.5 = half). Readable through the holes up close,
     ///     denser to a distant camera. A fresh random pattern is generated each time the view appears.
@@ -85,6 +89,7 @@ public extension View {
         openThresholdDegrees: Float = 8,
         closeThresholdDegrees: Float = 16,
         maxViewAngleDegrees: Float = 20,
+        screenshotProtected: Bool = true,
         maskFillRatio: Float = 0,
         maskCellSize: CGFloat = 3,
         maskRevealHeight: CGFloat = 70,
@@ -117,6 +122,7 @@ public extension View {
             openThresholdDeg: openThresholdDegrees,
             closeThresholdDeg: closeThresholdDegrees,
             maxViewAngleDeg: maxViewAngleDegrees,
+            screenshotProtected: screenshotProtected,
             authenticatedGaze: authenticatedGaze,
             gazeMinLux: gazeMinLux,
             gazeResumeLux: gazeResumeLux,
