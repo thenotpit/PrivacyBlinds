@@ -155,6 +155,7 @@ backgrounding** (which also covers the app-switcher snapshot).
 | `openThresholdDegrees` | `8` | At/below this much combined (roll+pitch) deviation the overlay is fully open |
 | `closeThresholdDegrees` | `16` | At/above this much combined (roll+pitch) deviation the overlay is fully closed |
 | `maxViewAngleDegrees` | `20` | Clamp for the sweep-direction angle |
+| `screenshotProtected` | `true` | Exclude protected content from screenshots / recordings / mirroring (secure layer) |
 | `maskFillRatio` | `0` | Privacy-mask density (0 = off; fraction of cells opaque) |
 | `maskCellSize` | `3` | Mask hole spacing in points (smaller = finer grain) |
 | `maskRevealHeight` | `70` | Height of the touch-following reading band, points |
@@ -172,13 +173,30 @@ backgrounding** (which also covers the app-switcher snapshot).
 
 Re-center the reading pose with a **two-finger triple-tap** on the protected view.
 
+### Capture & background protection
+
+- **Screenshots / recordings / mirroring** — with `screenshotProtected` (default `true`), the protected
+  content is hosted in a secure layer iOS excludes from capture, so it reads **blank** in any
+  screenshot, screen recording, or AirPlay mirror while staying visible live. *Caveats:* it relies on
+  UIKit's secure-field rendering (an undocumented behavior), severs SwiftUI environment inheritance into
+  the content, and is best for content that fills its frame.
+- **App switcher** — whenever the app leaves the foreground the cover is forced closed (all modes), so
+  the OS multitasking snapshot never shows content.
+
+### Accessibility
+
+- Honors **Reduce Motion** (the touch reading band snaps instead of animating).
+- `enabled: false` is the **always-reveal escape hatch** — fully disables gating *and* screenshot
+  hosting (clean passthrough) for users for whom pose/gaze gating is a barrier. Wire it to your app's
+  own accessibility preference.
+
 ## Status
 
-Reveal/cover sweep with black / color / image covers; multi-axis (roll + pitch) pose gating with
-settle-on-stillness anchoring and a two-finger triple-tap re-center; an optional perforated
-blue-noise privacy mask with a touch-following reading band; and optional eye-tracking look-away
-gating (on-device, opt-in). Not yet: custom-cover persistence, face-down deviation term, app-switcher
-snapshot cover, Reduce Motion / always-reveal accessibility override, and a live-tuning sheet.
+Shipping: reveal/cover sweep (black / color / image covers); multi-axis (roll + pitch) pose gating with
+settle-on-stillness anchoring and two-finger triple-tap re-center; an optional perforated blue-noise
+privacy mask with a touch-following reading band; **authenticated-gaze mode** (Face ID lock/unlock +
+on-device eye tracking, with a "warming up" calibration and re-lock); **screenshot/recording protection**;
+**app-switcher snapshot cover** (all modes); and Reduce-Motion support. All on-device.
 
 ## License
 
