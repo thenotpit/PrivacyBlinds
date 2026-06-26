@@ -22,7 +22,12 @@ final class BiometricAuthenticator: Authenticating {
     func authenticate(reason: String, completion: @escaping (Bool) -> Void) {
         Task { @MainActor in
             let context = LAContext()
-            context.localizedFallbackTitle = ""   // straight to passcode fallback, no custom button
+            // Leave `localizedFallbackTitle` at its default so the system shows the standard
+            // "Enter Passcode" fallback button when Face ID can't recognize the user (setting it to
+            // "" would HIDE that button, trapping the user in Face ID retries). With
+            // `.deviceOwnerAuthentication` the passcode IS the fallback, handled by the system, so a
+            // Face ID failure drops straight to PIN entry — and on repeated failures iOS presents it
+            // automatically.
             let success = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
                                                              localizedReason: reason)) ?? false
             completion(success)
