@@ -25,8 +25,9 @@ struct GazeReading: Sendable {
     /// head turn moves it just as an eye movement does. The overlay measures its angle against a
     /// captured "looking at the screen" baseline.
     var gazeDir: SIMD3<Float>
-    /// Device pose derived from ARKit (gravity-aligned), used while the AR session is running because
-    /// it suspends a separate CMMotionManager. Same conventions as `MotionManager` (radians).
+    /// Device pose derived from ARKit (gravity-aligned), radians. Historically used to drive pose while
+    /// gaze ran; pose now always comes from CoreMotion (`MotionManager`) so every overlay sweeps the
+    /// same way, regardless of which views run gaze. Kept for diagnostics; not consumed by the model.
     var roll: Float
     var pitch: Float
     /// Both eyes closed — gaze estimate is unreliable mid-blink, so consumers hold their last state.

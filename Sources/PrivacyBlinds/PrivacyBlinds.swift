@@ -72,11 +72,16 @@ public extension View {
     ///   - gazeMinLux: Ambient light (lux) below which gaze is suspended (pose-only). Default `450`.
     ///   - gazeResumeLux: Ambient light (lux) above which gaze resumes (hysteresis). Default `600`.
     ///   - relockSeconds: Re-lock after the view is continuously covered this long (default `10`).
+    ///   - syncGroup: Opt-in id for authenticated-gaze views. Views on screen sharing a non-nil id unlock
+    ///     and re-lock together — one Face ID clears the whole group. `nil` (default) keeps each view
+    ///     independent. Ignored when `authenticatedGaze` is `false`.
     ///   - unlockReason: Prompt text shown by Face ID / passcode (default `"Unlock to reveal"`).
     ///   - lockBackgroundColor: Locked-screen background, behind the perforation (default `.white`).
     ///   - lockPatternColor: Locked-screen blue-noise perforation color (default `.black`).
     ///   - lockIconBackgroundColor: Fill of the small square behind the lock icon (default `.white`).
     ///   - lockIconColor: Lock icon color (default `.black`).
+    ///   - showsLockIcon: Whether the lock glyph is drawn on the locked screen. Set `false` for a clean
+    ///     cover with no icon (default `true`).
     ///   - onStateChange: Called with `true` when the overlay becomes (mostly) closed, `false` when it reopens.
     ///   - onAmbientLux: Reports the ARKit ambient light estimate (lux) while gaze is active.
     func privacyBlinds(
@@ -99,11 +104,13 @@ public extension View {
         gazeMinLux: Double = 450,
         gazeResumeLux: Double = 600,
         relockSeconds: Double = 10,
+        syncGroup: String? = nil,
         unlockReason: String = "Unlock to reveal",
         lockBackgroundColor: Color = .white,
         lockPatternColor: Color = .black,
         lockIconBackgroundColor: Color = .white,
         lockIconColor: Color = .black,
+        showsLockIcon: Bool = true,
         onStateChange: ((Bool) -> Void)? = nil,
         onAmbientLux: ((Double) -> Void)? = nil
     ) -> some View {
@@ -127,11 +134,13 @@ public extension View {
             gazeMinLux: gazeMinLux,
             gazeResumeLux: gazeResumeLux,
             relockSeconds: relockSeconds,
+            syncGroup: syncGroup,
             unlockReason: unlockReason,
             lockBackgroundColor: lockBackgroundColor,
             lockPatternColor: lockPatternColor,
             lockIconBackgroundColor: lockIconBackgroundColor,
             lockIconColor: lockIconColor,
+            showsLockIcon: showsLockIcon,
             onStateChange: onStateChange,
             onAmbientLux: onAmbientLux
         ))
