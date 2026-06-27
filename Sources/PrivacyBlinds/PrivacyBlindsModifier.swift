@@ -44,23 +44,26 @@ final class PrivacyLensModel {
     private let poseSource: PoseSource
     private let gazeSource: GazeSource
     private let authenticator: Authenticating
+    private let syncCoordinator: SyncGroupCoordinator
     private var poseGate = PoseGate()
     private var gazeGate = GazeGate()
 
     private var token: UUID?
     private var gazeToken: UUID?
-    /// While the AR (eye-tracking) session runs it suspends CMMotionManager, so pose comes from ARKit.
-    private var usingARPose = false
     // Gaze config carried so unlock can (re)start gaze with the right thresholds.
     private var gazeMinLux = Tuning.ambientLuxLow
     private var gazeResumeLux = Tuning.ambientLuxHigh
+    /// Non-nil ⇒ this view unlocks/relocks together with other authenticated-gaze views sharing the id.
+    private(set) var syncGroup: String?
 
     init(pose: PoseSource = MotionManager.shared,
          gaze: GazeSource = EyeTracker.shared,
-         authenticator: Authenticating = BiometricAuthenticator()) {
+         authenticator: Authenticating = BiometricAuthenticator(),
+         syncCoordinator: SyncGroupCoordinator = .shared) {
         self.poseSource = pose
         self.gazeSource = gaze
         self.authenticator = authenticator
+        self.syncCoordinator = syncCoordinator
     }
 
     func start() {
@@ -72,7 +75,7 @@ final class PrivacyLensModel {
             // The sources always fan out on the main thread, so assume main-actor isolation and
             // update synchronously — no async hop, no motion lag.
             MainActor.assumeIsolated {
-                guard let self, !self.usingARPose else { return }   // ARKit drives pose while it runs
+                guard let self else { return }
                 self.poseGate.apply(roll: reading.roll, pitch: reading.pitch, now: CACurrentMediaTime())
                 self.publishPose()
             }
@@ -92,8 +95,9 @@ final class PrivacyLensModel {
     func startGaze(minLux: Double, resumeLux: Double) {
         gazeGate.minLux = minLux
         gazeGate.resumeLux = resumeLux
-        // Open the moment we unlock: zero pose + re-baseline gaze and publish now, so the view shows
-        // through the camera warm-up instead of flashing the cover until the first AR frame lands.
+        // Open the moment we unlock: re-anchor the reading pose to the current hold, re-baseline gaze,
+        // and publish now, so the view shows through the camera warm-up instead of flashing the cover
+        // until the first AR frame lands. Pose keeps streaming from CoreMotion (the single backend).
         gazeGate.recenter()
         poseGate.fullReset()
         gazeReady = false   // begin warm-up: hold the processing cover until tracking is online
@@ -104,19 +108,14 @@ final class PrivacyLensModel {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if reading.unavailable {
-                    // No TrueDepth / permission denied → AR drives nothing; stay on CoreMotion pose.
-                    if self.usingARPose { self.usingARPose = false; self.poseGate.fullReset() }
+                    // No TrueDepth / permission denied → no gaze; pose-only protection stays live.
                     self.gazeGate.reset()
-                    self.gazeReady = true   // no gaze → pose-only protection is live; end warm-up
-                    self.publishPose()
+                    self.gazeReady = true   // end warm-up
                     self.publishGaze()
                     return
                 }
-                // AR session is delivering frames → it drives pose (CMMotionManager is suspended).
-                if !self.usingARPose { self.usingARPose = true; self.poseGate.fullReset() }
-                self.poseGate.apply(roll: reading.roll, pitch: reading.pitch, now: CACurrentMediaTime())
-                self.publishPose()
-                // The gate handles look-away (binary slam) and low-light suspension internally.
+                // ARKit supplies GAZE ONLY; pose stays on CoreMotion so every overlay sweeps the same
+                // way. The gate handles look-away (binary slam) and low-light suspension internally.
                 self.gazeGate.apply(reading)
                 self.ambientLux = reading.ambientLux
                 self.gazeReady = self.gazeGate.ready
@@ -130,12 +129,11 @@ final class PrivacyLensModel {
         gazeToken = nil
         gazeGate.reset()
         gazeReady = false
-        if usingARPose { usingARPose = false; poseGate.fullReset() }
         publishGaze()
-        publishPose()   // zero deviations so the next start/unlock reads as open (no stale flash)
     }
 
     func stop() {
+        if let syncGroup { syncCoordinator.unregister(self, group: syncGroup) }
         if let token { poseSource.removeListener(token) }
         token = nil
         stopGaze()
@@ -144,31 +142,57 @@ final class PrivacyLensModel {
     // MARK: Authenticated-gaze lock state
 
     /// Enter authenticated-gaze mode: start LOCKED (camera off) and wait for a tap to authenticate.
-    func enterAuthenticatedMode(minLux: Double, resumeLux: Double) {
+    /// `syncGroup` (when set) joins a group that unlocks/relocks together — see `SyncGroupCoordinator`.
+    func enterAuthenticatedMode(minLux: Double, resumeLux: Double, syncGroup: String? = nil) {
         gazeMinLux = minLux
         gazeResumeLux = resumeLux
+        self.syncGroup = syncGroup
         regenerateMaskSeed()   // fresh perforation pattern for the locked screen
         lockState = .locked
+        // Registering may immediately unlock us if the group is already unlocked (handled in register).
+        if let syncGroup { syncCoordinator.register(self, group: syncGroup) }
     }
 
-    /// Tap on the locked cover → authenticate; on success unlock + start gaze, else stay locked.
+    /// Tap on the locked cover → authenticate; on success unlock + start gaze (and the rest of the sync
+    /// group), else stay locked.
     func beginUnlock(reason: String) {
         guard lockState == .locked else { return }
+        // A sibling in the same group is already prompting → don't stack a second sheet.
+        if let syncGroup, syncCoordinator.isAuthenticating(group: syncGroup) { return }
         lockState = .authenticating
+        if let syncGroup { syncCoordinator.setAuthenticating(group: syncGroup, true) }
         authenticator.authenticate(reason: reason) { [weak self] success in
             guard let self else { return }
+            if let syncGroup = self.syncGroup { self.syncCoordinator.setAuthenticating(group: syncGroup, false) }
             if success {
-                self.lockState = .unlocked
-                self.regenerateMaskSeed()
-                self.startGaze(minLux: self.gazeMinLux, resumeLux: self.gazeResumeLux)
+                self.unlockViaSync()
+                if let syncGroup = self.syncGroup {
+                    self.syncCoordinator.broadcastUnlock(group: syncGroup, from: self)
+                }
             } else {
                 self.lockState = .locked
             }
         }
     }
 
-    /// Return to the locked state (re-lock): stop gaze/camera and require auth again.
+    /// Apply an unlock that originated here OR from a sync-group sibling: unlock + start gaze. Does NOT
+    /// prompt and does NOT re-broadcast (the broadcaster handles the rest of the group).
+    func unlockViaSync() {
+        guard lockState != .unlocked else { return }
+        lockState = .unlocked
+        regenerateMaskSeed()
+        startGaze(minLux: gazeMinLux, resumeLux: gazeResumeLux)
+    }
+
+    /// Return to the locked state (re-lock) and take the rest of the sync group with us.
     func relock() {
+        relockViaSync()
+        if let syncGroup { syncCoordinator.broadcastRelock(group: syncGroup, from: self) }
+    }
+
+    /// Apply a re-lock that originated here OR from a sync-group sibling: stop gaze/camera and require
+    /// auth again. Does NOT re-broadcast.
+    func relockViaSync() {
         guard lockState != .locked else { return }
         regenerateMaskSeed()   // fresh perforation pattern each lock
         lockState = .locked
@@ -219,6 +243,7 @@ public struct PrivacyBlindsModifier: ViewModifier {
     var gazeMinLux: Double = Tuning.ambientLuxLow      // suspend gaze below this ambient light
     var gazeResumeLux: Double = Tuning.ambientLuxHigh  // resume gaze above this ambient light
     var relockSeconds: Double = 10                     // re-lock after this long continuously covered
+    var syncGroup: String?                             // shared id → unlock/relock with the group as one
     var lockMaskFillRatio: Float = 0.4                 // perforation density on the locked screen
     var unlockReason: String = "Unlock to reveal"
     // Locked-screen appearance (all default to the stock white / black look).
@@ -226,6 +251,7 @@ public struct PrivacyBlindsModifier: ViewModifier {
     var lockPatternColor: Color = .black
     var lockIconBackgroundColor: Color = .white
     var lockIconColor: Color = .black
+    var showsLockIcon: Bool = true   // false → locked screen shows just the cover, no lock glyph
     var onStateChange: ((Bool) -> Void)?
     var onAmbientLux: ((Double) -> Void)?   // reports the ARKit ambient light estimate (lux)
 
@@ -377,10 +403,11 @@ public struct PrivacyBlindsModifier: ViewModifier {
 
     /// Start the right mode for the current `authenticatedGaze` setting.
     private func startMode() {
+        // CoreMotion pose is the single backend under every mode (gaze, when on, only adds look-away).
+        // Authenticated views show the locked cover over this until unlocked.
+        model.start()
         if authenticatedGaze {
-            model.enterAuthenticatedMode(minLux: gazeMinLux, resumeLux: gazeResumeLux)
-        } else {
-            model.start()
+            model.enterAuthenticatedMode(minLux: gazeMinLux, resumeLux: gazeResumeLux, syncGroup: syncGroup)
         }
     }
 
@@ -431,7 +458,7 @@ public struct PrivacyBlindsModifier: ViewModifier {
     /// The locked state: the perforated field with the lock glyph. Tapping it prompts Face ID.
     private func lockedCover(size: CGSize) -> some View {
         perforatedField(size: size, fill: lockMaskFillRatio)
-            .overlay { lockGlyph }
+            .overlay { if showsLockIcon { lockGlyph(size: size) } }
             .ignoresSafeArea()
             .contentShape(Rectangle())
             .onTapGesture { model.beginUnlock(reason: unlockReason) }
@@ -450,16 +477,20 @@ public struct PrivacyBlindsModifier: ViewModifier {
         .contentShape(Rectangle())
     }
 
-    /// Lock icon on a tight square (8pt padding all around). Uses the bundled vector icon, template-
-    /// rendered so `lockIconColor` tints it.
-    private var lockGlyph: some View {
-        Image("lock-icon", bundle: .module)
+    /// Lock icon on a tight square. Uses the bundled vector icon, template-rendered so `lockIconColor`
+    /// tints it. At full size it's a 36pt icon on a 52pt square (8pt padding); on a container too small
+    /// to hold that it scales down proportionally to fit, but never grows past full size.
+    private func lockGlyph(size: CGSize) -> some View {
+        let fullBox: CGFloat = 52                                  // 36 icon + 8 padding each side
+        let box = min(fullBox, min(size.width, size.height))      // shrink to fit; cap at full size
+        let scale = box / fullBox
+        return Image("lock-icon", bundle: .module)
             .renderingMode(.template)
             .resizable()
             .scaledToFit()
-            .frame(width: 36, height: 36)
+            .frame(width: 36 * scale, height: 36 * scale)
             .foregroundStyle(lockIconColor)
-            .padding(8)
+            .padding(8 * scale)
             .background(lockIconBackgroundColor)
     }
 

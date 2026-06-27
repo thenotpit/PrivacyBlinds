@@ -211,8 +211,14 @@ import simd
     }
     final class FakeAuth: Authenticating {
         var succeed = true
+        var autoComplete = true                  // false → hold the prompt open until finish()
         private(set) var calls = 0
-        func authenticate(reason: String, completion: @escaping (Bool) -> Void) { calls += 1; completion(succeed) }
+        private var pending: ((Bool) -> Void)?
+        func authenticate(reason: String, completion: @escaping (Bool) -> Void) {
+            calls += 1
+            if autoComplete { completion(succeed) } else { pending = completion }
+        }
+        func finish() { pending?(succeed); pending = nil }
     }
 
     private func makeModel(_ auth: FakeAuth = FakeAuth()) -> PrivacyLensModel {
@@ -259,5 +265,81 @@ import simd
         model.beginUnlock(reason: "x")        // ignored (already unlocked)
         #expect(auth.calls == 1)
         #expect(model.lockState == .unlocked)
+    }
+
+    // MARK: Synced unlock (syncGroup)
+
+    /// Two models sharing a coordinator + group id, each with its own fakes.
+    private func makeGroup(_ coord: SyncGroupCoordinator, auth: FakeAuth = FakeAuth()) -> PrivacyLensModel {
+        PrivacyLensModel(pose: FakePose(), gaze: FakeGaze(), authenticator: auth, syncCoordinator: coord)
+    }
+
+    @Test func syncedGroupUnlocksTogether() {
+        let coord = SyncGroupCoordinator()
+        let a = makeGroup(coord), b = makeGroup(coord)
+        a.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "g")
+        b.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "g")
+        a.beginUnlock(reason: "x")
+        #expect(a.lockState == .unlocked)
+        #expect(b.lockState == .unlocked)   // unlocked via sync, never prompted itself
+    }
+
+    @Test func differentGroupsStayIsolated() {
+        let coord = SyncGroupCoordinator()
+        let a = makeGroup(coord), b = makeGroup(coord)
+        a.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "a")
+        b.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "b")
+        a.beginUnlock(reason: "x")
+        #expect(a.lockState == .unlocked)
+        #expect(b.lockState == .locked)
+    }
+
+    @Test func nilGroupStaysIndependent() {
+        let coord = SyncGroupCoordinator()
+        let a = makeGroup(coord), b = makeGroup(coord)
+        a.enterAuthenticatedMode(minLux: 0, resumeLux: 0)   // nil group
+        b.enterAuthenticatedMode(minLux: 0, resumeLux: 0)
+        a.beginUnlock(reason: "x")
+        #expect(a.lockState == .unlocked)
+        #expect(b.lockState == .locked)
+    }
+
+    @Test func syncedRelockLocksGroup() {
+        let coord = SyncGroupCoordinator()
+        let a = makeGroup(coord), b = makeGroup(coord)
+        a.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "g")
+        b.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "g")
+        a.beginUnlock(reason: "x")
+        #expect(b.lockState == .unlocked)
+        a.relock()
+        #expect(a.lockState == .locked)
+        #expect(b.lockState == .locked)     // re-locked via sync
+    }
+
+    @Test func newcomerJoinsUnlockedGroup() {
+        let coord = SyncGroupCoordinator()
+        let a = makeGroup(coord)
+        a.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "g")
+        a.beginUnlock(reason: "x")
+        #expect(a.lockState == .unlocked)
+        // A second view appears while the group is already unlocked.
+        let b = makeGroup(coord)
+        b.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "g")
+        #expect(b.lockState == .unlocked)   // joined unlocked, no prompt
+    }
+
+    @Test func secondPromptSuppressedWhileGroupAuthenticating() {
+        let coord = SyncGroupCoordinator()
+        let authA = FakeAuth(); authA.autoComplete = false   // hold A's sheet open
+        let authB = FakeAuth()
+        let a = makeGroup(coord, auth: authA), b = makeGroup(coord, auth: authB)
+        a.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "g")
+        b.enterAuthenticatedMode(minLux: 0, resumeLux: 0, syncGroup: "g")
+        a.beginUnlock(reason: "x")          // A's prompt is up, not yet resolved
+        b.beginUnlock(reason: "x")          // suppressed — the group is already authenticating
+        #expect(authB.calls == 0)
+        authA.finish()                      // A succeeds → unlocks the whole group
+        #expect(a.lockState == .unlocked)
+        #expect(b.lockState == .unlocked)
     }
 }

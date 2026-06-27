@@ -136,7 +136,17 @@ backgrounding** (which also covers the app-switcher snapshot).
   suspends (configurable via `gazeMinLux` / `gazeResumeLux`) and pose carries the gate; Face ID itself
   works in the dark. Read the live lux via `onAmbientLux`.
 - The locked-screen colors are configurable (`lockBackgroundColor`, `lockPatternColor`,
-  `lockIconBackgroundColor`, `lockIconColor`).
+  `lockIconBackgroundColor`, `lockIconColor`), and the lock glyph can be hidden entirely with
+  `showsLockIcon: false` for a clean cover; on a small view it scales down to fit (never larger than
+  its default).
+- **Synced unlock across views:** give several authenticated-gaze views the **same `syncGroup` id** and
+  a single Face ID unlocks — and a single re-lock re-locks — the whole group currently on screen,
+  instead of each view prompting on its own. Omit it (`nil`, default) and every view stays independent.
+
+```swift
+AccountNumber().privacyBlinds(authenticatedGaze: true, syncGroup: "account")
+Statement().privacyBlinds(authenticatedGaze: true, syncGroup: "account")   // one Face ID unlocks both
+```
 
 > Scope note: ARKit gaze is good for **coarse "looking at the screen vs. away,"** not precise
 > on-screen gaze, and it is **not** identity-aware — it gates on "a face is looking," not "the owner
@@ -165,11 +175,13 @@ backgrounding** (which also covers the app-switcher snapshot).
 | `gazeMinLux` | `450` | Suspend gaze below this ambient light (lux); falls back to pose-only |
 | `gazeResumeLux` | `600` | Resume gaze above this ambient light (lux); hysteresis band |
 | `relockSeconds` | `10` | Re-lock after the view is continuously covered this long |
+| `syncGroup` | `nil` | Shared id for authenticated-gaze views; same id on screen ⇒ one Face ID unlocks & re-locks them as a group (`nil` = independent) |
 | `unlockReason` | `"Unlock to reveal"` | Prompt text shown by Face ID / passcode |
 | `lockBackgroundColor` | `.white` | Locked-screen background behind the perforation |
 | `lockPatternColor` | `.black` | Locked-screen blue-noise perforation color |
 | `lockIconBackgroundColor` | `.white` | Fill of the square behind the lock icon |
 | `lockIconColor` | `.black` | Lock icon color |
+| `showsLockIcon` | `true` | Draw the lock glyph on the locked screen (`false` = clean cover, no icon; scales to fit small views) |
 
 Re-center the reading pose with a **two-finger triple-tap** on the protected view.
 
@@ -195,8 +207,10 @@ Re-center the reading pose with a **two-finger triple-tap** on the protected vie
 Shipping: reveal/cover sweep (black / color / image covers); multi-axis (roll + pitch) pose gating with
 settle-on-stillness anchoring and two-finger triple-tap re-center; an optional perforated blue-noise
 privacy mask with a touch-following reading band; **authenticated-gaze mode** (Face ID lock/unlock +
-on-device eye tracking, with a "warming up" calibration and re-lock); **screenshot/recording protection**;
-**app-switcher snapshot cover** (all modes); and Reduce-Motion support. All on-device.
+on-device eye tracking, with a "warming up" calibration and re-lock), including **grouped unlock** where
+views sharing a `syncGroup` unlock and re-lock as one and an optional **hidden lock glyph**
+(`showsLockIcon`); **screenshot/recording protection**; **app-switcher snapshot cover** (all modes); and
+Reduce-Motion support. All on-device.
 
 ## License
 
