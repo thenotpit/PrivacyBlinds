@@ -2,10 +2,10 @@
 //  ContentView.swift
 //  Privacy Blinds
 //
-//  Test harness for the PrivacyBlinds package. Mock "secret" content sits under the
-//  `.privacyBlinds` overlay; a clean monochrome panel (on top, never covered) lets you pick the
-//  cover (black / color / image from the library) and shows whether the lens is currently
-//  revealed or covered as you roll the device.
+//  Test harness for the PrivacyBlinds package. Two independent `.privacyBlinds` overlays — a small
+//  "Account" field and the scrolling notes below it — sit under a clean monochrome control panel
+//  (on top, never covered) that lets you pick the cover (black / color / image from the library)
+//  and shows whether the lens is currently revealed or covered as you roll the device.
 //
 
 import SwiftUI
@@ -26,7 +26,8 @@ struct ContentView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var pickedImage: Image?
     @State private var maskOn = false
-    @State private var eyeTrackingOn = false
+    @State private var authGazeOn = false
+    @State private var ambientLux: Double = -1
 
     /// Resolve the segmented selection into the package's `PrivacyCover`. If "Image" is selected
     /// but nothing has been picked yet, fall back to black.
@@ -40,18 +41,34 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // --- Protected content + the privacy lens overlay --------------------------------
-            SecretContent()
-                .privacyBlinds(
-                    cover: currentCover,
-                    maskFillRatio: maskOn ? 0.4 : 0,
-                    maskCellSize: 3,
-                    eyeTracking: eyeTrackingOn,
-                    onStateChange: { closed in lensClosed = closed }
-                )
-                .ignoresSafeArea()
+            Color.white.ignoresSafeArea()
 
-            // --- Control panel (sits above the lens, stays interactive) ----------------------
+            VStack(alignment: .leading, spacing: 20) {
+                // "Account: <number>" — only the NUMBER carries the privacy overlay.
+                accountField
+
+                // "Private Notes" title stays uncovered; the scroll below it carries the overlay.
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Private Notes")
+                        .font(.largeTitle.weight(.bold))
+                        .foregroundStyle(.black)
+
+                    SecretContent()
+                        .privacyBlinds(
+                            cover: currentCover,
+                            maskFillRatio: maskOn ? 0.4 : 0,
+                            maskCellSize: 3,
+                            authenticatedGaze: authGazeOn,
+                            syncGroup: "account",   // unlock together with the account field (when gaze on)
+                            onStateChange: { closed in lensClosed = closed },
+                            onAmbientLux: { ambientLux = $0 }
+                        )
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(20)
+
+            // Control panel — floats on top, never covered.
             controlPanel
                 .padding()
         }
@@ -94,9 +111,16 @@ struct ContentView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.black)
 
-            Toggle("Eye tracking", isOn: $eyeTrackingOn)
+            Toggle("Authenticated gaze (Face ID)", isOn: $authGazeOn)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.black)
+
+            if authGazeOn {
+                Text("Ambient: \(ambientLux < 0 ? "—" : String(Int(ambientLux))) lux")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.black.opacity(0.6))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .padding(20)
         .background(
@@ -106,20 +130,44 @@ struct ContentView: View {
         )
         .shadow(color: .black.opacity(0.08), radius: 16, y: 4)
     }
+
+    /// "Account: 4029 8175" on a single line. Only the number carries the privacy overlay (always Face
+    /// ID, no lock icon); the "Account:" label stays visible. (Made-up 8-digit number.)
+    private var accountField: some View {
+        let number = "4029 8175"
+        return HStack(spacing: 6) {
+            Text("Account:")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.black)
+            // The secure-capture host fills its frame, so pin the protected number to one line: a hidden
+            // ruler copy sets the height, and the real (protected) number fills that exact one-line box —
+            // screenshot protection stays on (default), so the number is excluded from captures too.
+            Text(number)
+                .font(.body.monospacedDigit())
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .hidden()
+                .overlay {
+                    Text(number)
+                        .font(.body.monospacedDigit())
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .privacyBlinds(
+                            authenticatedGaze: true,
+                            syncGroup: "account",   // one Face ID unlocks this + the notes (when gaze on)
+                            showsLockIcon: false
+                        )
+                }
+        }
+    }
 }
 
-/// Mock secret content — text-heavy so reveal/cover reads clearly. Clean B&W: white ground,
-/// black headings, hairline dividers between entries (no filled boxes).
+/// Mock secret content — the scrolling notes only (the "Private Notes" title lives above this in the
+/// caller). Text-heavy so reveal/cover reads clearly; hairline dividers between entries. The caller
+/// wraps this in its own `.privacyBlinds` overlay.
 struct SecretContent: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                Text("Private Notes")
-                    .font(.largeTitle.weight(.bold))
-                    .foregroundStyle(.black)
-                    .padding(.top, 72)
-                    .padding(.bottom, 8)
-
                 ForEach(0..<12) { i in
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Entry \(i + 1)")
@@ -136,10 +184,8 @@ struct SecretContent: View {
                     if i < 11 { Divider().overlay(.black.opacity(0.08)) }
                 }
             }
-            .padding(.horizontal, 24)
             .padding(.bottom, 220) // keep last rows clear of the control panel
         }
-        .background(Color.white)
     }
 }
 
